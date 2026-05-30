@@ -1,0 +1,59 @@
+# Generic crawler examples for ChainAlpha.
+# Keep heavy/dynamic sources disabled by default. Enable only the source you need.
+
+sources:
+  - name: prnewswire_rss
+    type: rss
+    enabled: false
+    urls:
+      - https://www.prnewswire.com/rss/news-releases-list.rss
+    source_type: press_release
+    fetch_linked_pages: true
+    max_pages: 25
+
+  - name: nvidia_news_browser
+    type: playwright
+    enabled: false
+    urls:
+      - "https://nvidianews.nvidia.com/news"
+    wait_selector: "body"
+    item_selector: "a"
+    title_selector: "a"
+    link_selector: "a"
+    fetch_linked_pages: true
+    content_selector: "body"
+    headless: true
+    max_items: 20
+
+  - name: kr36_search_page
+    type: search_pages
+    enabled: false
+    search_url_templates:
+      - https://36kr.com/search/articles/{query}
+    allowed_domains:
+      - 36kr.com
+      - www.36kr.com
+    source_type: mainstream_media
+    fetch_linked_pages: true
+    max_linked_pages_per_query: 5
+
+  - name: dynamic_xueqiu_example
+    type: playwright
+    enabled: false
+    search_url_templates:
+      - https://xueqiu.com/k?q={query}
+    allowed_domains:
+      - xueqiu.com
+    source_type: social_media
+    fetch_linked_pages: false
+    wait_until: domcontentloaded
+    content_selector: body
+    headless: true
+
+  - name: example_sitemap
+    type: sitemap
+    enabled: false
+    urls:
+      - https://example.com/sitemap.xml
+    source_type: company_website
+    max_urls: 20

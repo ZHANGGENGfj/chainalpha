@@ -1,0 +1,218 @@
+# Company-to-industry-node mapping used by `chainalpha candidates`.
+#
+# Keep `nodes` aligned with canonical node names in
+# `src/chainalpha/ontology/ai_supply_chain.yaml`.
+# Display names can be Chinese, but nodes should be stable English IDs.
+
+companies:
+  # Optical module / silicon photonics
+  - name: 中际旭创
+    ticker: 300308.SZ
+    exchange: SZSE
+    industry: optical_communication
+    nodes: [Optical Module, Silicon Photonics, Network Switch]
+    aliases: [InnoLight, 中际旭创股份]
+    role: AI data-center high-speed optical module supplier
+    watch_tags: [AI产业链, 光模块, 800G, CPO]
+
+  - name: 新易盛
+    ticker: 300502.SZ
+    exchange: SZSE
+    industry: optical_communication
+    nodes: [Optical Module, Silicon Photonics, Network Switch]
+    aliases: [Eoptolink, 新易盛通信]
+    role: High-speed optical module supplier
+    watch_tags: [AI产业链, 光模块, 800G]
+
+  - name: 天孚通信
+    ticker: 300394.SZ
+    exchange: SZSE
+    industry: optical_component
+    nodes: [Optical Module, Laser, Silicon Photonics]
+    aliases: [TFC, 天孚]
+    role: Optical component and passive device supplier
+    watch_tags: [AI产业链, 光器件, 硅光]
+
+  - name: 华工科技
+    ticker: 000988.SZ
+    exchange: SZSE
+    industry: optical_communication
+    nodes: [Optical Module, Laser]
+    aliases: [HGTECH, 华工正源]
+    role: Optical module and laser technology supplier
+    watch_tags: [AI产业链, 光模块]
+
+  - name: 光迅科技
+    ticker: 002281.SZ
+    exchange: SZSE
+    industry: optical_component
+    nodes: [Optical Module, Laser, Silicon Photonics]
+    aliases: [Accelink, 光迅]
+    role: Optical device and module supplier
+    watch_tags: [AI产业链, 光器件]
+
+  - name: 剑桥科技
+    ticker: 603083.SH
+    exchange: SSE
+    industry: optical_communication
+    nodes: [Optical Module, Network Switch]
+    aliases: [CIG, Cambridge Industries]
+    role: Telecom and datacenter optical module supplier
+    watch_tags: [AI产业链, 光模块]
+
+  # PCB / server hardware
+  - name: 沪电股份
+    ticker: 002463.SZ
+    exchange: SZSE
+    industry: pcb
+    nodes: [AI Server, Network Switch, GPU Cluster]
+    aliases: [WUS Printed Circuit, 沪士电子]
+    role: High-speed PCB supplier for servers and networking
+    watch_tags: [AI产业链, PCB, AI服务器]
+
+  - name: 深南电路
+    ticker: 002916.SZ
+    exchange: SZSE
+    industry: pcb
+    nodes: [AI Server, Network Switch, Advanced Packaging]
+    aliases: [SCC, Shennan Circuits]
+    role: PCB, packaging substrate, and electronic assembly supplier
+    watch_tags: [AI产业链, PCB, 载板]
+
+  - name: 生益科技
+    ticker: 600183.SH
+    exchange: SSE
+    industry: pcb_material
+    nodes: [AI Server, Network Switch, Advanced Packaging]
+    aliases: [SYTECH, 生益]
+    role: High-speed copper clad laminate and PCB material supplier
+    watch_tags: [AI产业链, PCB材料]
+
+  - name: 胜宏科技
+    ticker: 300476.SZ
+    exchange: SZSE
+    industry: pcb
+    nodes: [AI Server, Network Switch]
+    aliases: [Victory Giant, 胜宏]
+    role: PCB supplier for servers and communication equipment
+    watch_tags: [AI产业链, PCB]
+
+  - name: 工业富联
+    ticker: 601138.SH
+    exchange: SSE
+    industry: ai_server
+    nodes: [AI Server, GPU Cluster, AI Data Center]
+    aliases: [FII, Foxconn Industrial Internet, 富士康工业互联网]
+    role: AI server and cloud infrastructure manufacturing platform
+    watch_tags: [AI产业链, AI服务器]
+
+  - name: 浪潮信息
+    ticker: 000977.SZ
+    exchange: SZSE
+    industry: ai_server
+    nodes: [AI Server, GPU Cluster, AI Data Center]
+    aliases: [Inspur, 浪潮]
+    role: Server and AI computing infrastructure vendor
+    watch_tags: [AI产业链, AI服务器]
+
+  - name: 中科曙光
+    ticker: 603019.SH
+    exchange: SSE
+    industry: ai_server
+    nodes: [AI Server, GPU Cluster, AI Data Center]
+    aliases: [Sugon, 曙光]
+    role: HPC and AI computing infrastructure vendor
+    watch_tags: [AI产业链, 算力]
+
+  # Data center power / cooling
+  - name: 英维克
+    ticker: 002837.SZ
+    exchange: SZSE
+    industry: liquid_cooling
+    nodes: [Liquid Cooling, AI Data Center, Power Grid]
+    aliases: [Envicool, 英维克科技]
+    role: Data-center cooling and thermal management supplier
+    watch_tags: [AI产业链, 液冷, 数据中心]
+
+  - name: 申菱环境
+    ticker: 301018.SZ
+    exchange: SZSE
+    industry: liquid_cooling
+    nodes: [Liquid Cooling, AI Data Center]
+    aliases: [Shenling, 申菱]
+    role: Precision air conditioning and liquid cooling supplier
+    watch_tags: [AI产业链, 液冷]
+
+  - name: 高澜股份
+    ticker: 300499.SZ
+    exchange: SZSE
+    industry: liquid_cooling
+    nodes: [Liquid Cooling, AI Data Center]
+    aliases: [Goaland, 高澜]
+    role: Thermal management and liquid cooling supplier
+    watch_tags: [AI产业链, 液冷]
+
+  - name: 科士达
+    ticker: 002518.SZ
+    exchange: SZSE
+    industry: data_center_power
+    nodes: [Power Grid, AI Data Center]
+    aliases: [KSTAR, 科士达科技]
+    role: UPS, data-center power, and energy storage supplier
+    watch_tags: [AI产业链, 电力, UPS]
+
+  - name: 科华数据
+    ticker: 002335.SZ
+    exchange: SZSE
+    industry: data_center_power
+    nodes: [Power Grid, AI Data Center]
+    aliases: [Kehua Data, 科华]
+    role: Data-center power infrastructure and IDC operator
+    watch_tags: [AI产业链, 电力, 数据中心]
+
+  # Packaging / HBM adjacent
+  - name: 长电科技
+    ticker: 600584.SH
+    exchange: SSE
+    industry: advanced_packaging
+    nodes: [Advanced Packaging, HBM, AI ASIC]
+    aliases: [JCET, 长电]
+    role: Semiconductor packaging and testing supplier
+    watch_tags: [AI产业链, 先进封装]
+
+  - name: 通富微电
+    ticker: 002156.SZ
+    exchange: SZSE
+    industry: advanced_packaging
+    nodes: [Advanced Packaging, HBM, AI ASIC]
+    aliases: [TFME, 通富]
+    role: Semiconductor packaging and testing supplier
+    watch_tags: [AI产业链, 先进封装]
+
+  - name: 华海诚科
+    ticker: 688535.SH
+    exchange: SSE
+    industry: packaging_material
+    nodes: [Advanced Packaging, HBM]
+    aliases: [HHCK, 华海]
+    role: Semiconductor packaging material supplier
+    watch_tags: [AI产业链, 先进封装材料]
+
+  # Enterprise AI / applications
+  - name: 金山办公
+    ticker: 688111.SH
+    exchange: SSE
+    industry: enterprise_ai
+    nodes: [Enterprise AI, Model API]
+    aliases: [WPS, Kingsoft Office]
+    role: Office software and enterprise AI application vendor
+    watch_tags: [AI应用, 企业AI]
+
+  - name: 科大讯飞
+    ticker: 002230.SZ
+    exchange: SZSE
+    industry: enterprise_ai
+    nodes: [Enterprise AI, Model API, AI Security]
+    aliases: [iFLYTEK, 讯飞]
+    role: AI model, speech, education, and enterprise AI vendor
+    watch_tags: [AI应用, 大模型]

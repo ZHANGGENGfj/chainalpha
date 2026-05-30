@@ -1,0 +1,2 @@
+[console_scripts]
+chainalpha = chainalpha.cli:app

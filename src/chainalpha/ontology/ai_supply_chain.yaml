@@ -1,0 +1,70 @@
+nodes:
+  AI CapEx:
+    type: driver
+    aliases: ["AI资本开支", "资本开支", "capex", "云厂商投资", "数据中心投资", "AI infrastructure", "AI 基础设施"]
+  AI Data Center:
+    type: infrastructure
+    aliases: ["数据中心", "智算中心", "IDC", "AI数据中心", "机房", "算力中心"]
+  Power Grid:
+    type: infrastructure
+    aliases: ["电力", "电网", "变压器", "UPS", "PDU", "母线槽", "储能", "燃气轮机"]
+  Liquid Cooling:
+    type: infrastructure
+    aliases: ["液冷", "冷板", "CDU", "冷却液", "散热", "高功率机柜"]
+  GPU Cluster:
+    type: compute
+    aliases: ["GPU集群", "AI集群", "算力集群", "H100", "H200", "B200", "GB200", "Blackwell"]
+  AI ASIC:
+    type: compute
+    aliases: ["ASIC", "TPU", "Trainium", "Maia", "MTIA", "自研芯片", "AI芯片"]
+  HBM:
+    type: semiconductor
+    aliases: ["HBM", "HBM3", "HBM3E", "HBM4", "高带宽内存"]
+  Advanced Packaging:
+    type: semiconductor
+    aliases: ["CoWoS", "先进封装", "2.5D", "3D封装", "SoIC", "EMIB", "ABF载板"]
+  AI Server:
+    type: hardware
+    aliases: ["AI服务器", "GPU服务器", "服务器", "整机柜", "ODM", "PCB", "高速PCB", "电源模块"]
+  Network Switch:
+    type: networking
+    aliases: ["交换机", "交换芯片", "Tomahawk", "Spectrum-X", "以太网", "InfiniBand", "NIC", "DPU"]
+  Optical Module:
+    type: networking
+    aliases: ["光模块", "400G", "800G", "1.6T", "3.2T", "OSFP", "QSFP-DD"]
+  Laser:
+    type: component
+    aliases: ["EML", "CW激光器", "激光器", "光芯片", "InP", "磷化铟"]
+  Silicon Photonics:
+    type: component
+    aliases: ["硅光", "Silicon Photonics", "CPO", "LPO", "薄膜铌酸锂", "TFLN", "光引擎"]
+  Model API:
+    type: platform
+    aliases: ["模型API", "推理平台", "GPU云", "MaaS", "模型服务", "token成本"]
+  Enterprise AI:
+    type: application
+    aliases: ["企业AI", "Agent", "RAG", "知识库", "AI客服", "AI办公", "AI编程", "行业大模型"]
+  AI Security:
+    type: governance
+    aliases: ["AI安全", "数据安全", "隐私计算", "模型评估", "合规审计", "红队测试"]
+
+edges:
+  - ["AI CapEx", "AI Data Center", "drives"]
+  - ["AI CapEx", "GPU Cluster", "drives"]
+  - ["AI CapEx", "AI ASIC", "drives"]
+  - ["AI Data Center", "Power Grid", "constrains"]
+  - ["AI Data Center", "Liquid Cooling", "requires"]
+  - ["GPU Cluster", "HBM", "requires"]
+  - ["GPU Cluster", "Advanced Packaging", "requires"]
+  - ["GPU Cluster", "AI Server", "requires"]
+  - ["GPU Cluster", "Network Switch", "requires"]
+  - ["AI ASIC", "HBM", "requires"]
+  - ["AI ASIC", "Advanced Packaging", "requires"]
+  - ["AI Server", "Power Grid", "requires"]
+  - ["AI Server", "Liquid Cooling", "requires"]
+  - ["Network Switch", "Optical Module", "requires"]
+  - ["Optical Module", "Laser", "requires"]
+  - ["Optical Module", "Silicon Photonics", "upgrades_to"]
+  - ["Model API", "Enterprise AI", "enables"]
+  - ["Enterprise AI", "AI Security", "requires"]
+  - ["GPU Cluster", "Model API", "enables"]

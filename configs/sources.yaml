@@ -1,0 +1,24 @@
+# Lightweight default connector config.
+# For all public/news/announcement/alternative/social templates, see configs/sources_full.yaml.
+
+sources:
+  - name: local_raw_files
+    type: local_files
+    enabled: true
+    path: ./data/raw
+    patterns: ["*.md", "*.txt", "*.json", "*.jsonl", "*.csv"]
+    source_type: local_file
+    recursive: true
+
+  - name: obsidian_vault
+    type: obsidian
+    enabled: false
+    path: ./vault
+
+  - name: media_crawler_outputs
+    type: media_crawler
+    enabled: false
+    root_dir: ../MediaCrawler-main/data
+    platforms: [xq, cls]
+    modes: [cache, processed, raw]
+    keywords: [AI产业链, 光模块, HBM, CoWoS, 液冷, 数据中心, 算力]

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chainalpha"
+version = "0.1.0"
+description = "Industry-chain weak signal intelligence agent with Obsidian-compatible memory."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "ChainAlpha Contributors"}]
+license = {text = "MIT"}
+dependencies = [
+    "typer>=0.12.0",
+    "rich>=13.7.0",
+    "PyYAML>=6.0.1",
+    "requests>=2.31.0",
+    "pypdf>=4.2.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.27.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+chainalpha = "chainalpha.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+chainalpha = ["ontology/*.yaml"]
+
+[project.optional-dependencies]
+playwright = ["playwright>=1.44.0"]
+china_data = [
+    "akshare>=1.16.80",
+    "mootdx>=0.11.7",
+    "pandas>=2.0.0",
+]

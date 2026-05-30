@@ -1,0 +1,29 @@
+source_reliability:
+  official_announcement: 1.0
+  financial_report: 0.95
+  investor_relation: 0.9
+  company_website: 0.85
+  industry_research: 0.8
+  mainstream_media: 0.7
+  social_media: 0.35
+  obsidian_note: 0.75
+  local_file: 0.65
+  connector_error: 0.0
+  unknown: 0.55
+
+stage_weights:
+  S0: 0.65
+  S1: 1.00
+  S2: 1.20
+  S3: 0.75
+  S4: 0.35
+
+hot_keywords:
+  - 大涨
+  - 暴涨
+  - 涨停
+  - 火爆
+  - 热议
+  - 刷屏
+  - 炒作
+  - 风口

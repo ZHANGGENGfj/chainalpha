@@ -1,0 +1,309 @@
+# ChainAlpha full data-source configuration template.
+# 默认只开启 local_raw_files，避免你一运行就大量请求外部网站。
+# 需要哪个源，就把 enabled 改成 true，并填好 API key / cookie / 本地路径。
+
+sources:
+  # -----------------------
+  # 0. Local / Obsidian / MediaCrawler exports
+  # -----------------------
+  - name: local_raw_files
+    type: local_files
+    enabled: true
+    path: ./data/raw
+    patterns: ["*.md", "*.txt", "*.json", "*.jsonl", "*.csv"]
+    source_type: local_file
+    recursive: true
+
+  - name: obsidian_vault
+    type: obsidian
+    enabled: false
+    path: ./vault
+
+  - name: media_crawler_outputs
+    type: media_crawler
+    enabled: false
+    root_dir: ../MediaCrawler-main/data
+    platforms: [xq, cls]
+    modes: [cache, processed, raw]
+    keywords: [AI产业链, 光模块, HBM, CoWoS, 液冷, 数据中心, 算力]
+
+  # -----------------------
+  # 1. 新闻：财联社 / 证券时报 / 36氪 / 21世纪经济报道 / Reuters / Bloomberg / PRNewswire
+  #    类型 news_source 使用公开搜索页或RSS，不绕过登录/付费墙。
+  # -----------------------
+  - name: cls_news
+    type: news_source
+    enabled: false
+    source_key: cls
+    fetch_linked_pages: false
+    max_linked_pages_per_query: 3
+
+  - name: stcn_news
+    type: news_source
+    enabled: false
+    source_key: stcn
+    fetch_linked_pages: false
+
+  - name: kr36_news
+    type: news_source
+    enabled: false
+    source_key: 36kr
+    fetch_linked_pages: false
+
+  - name: yicai_21jingji_news
+    type: news_source
+    enabled: false
+    source_key: 21jingji
+    fetch_linked_pages: false
+
+  - name: reuters_news
+    type: news_source
+    enabled: false
+    source_key: reuters
+    fetch_linked_pages: false
+
+  - name: bloomberg_news
+    type: news_source
+    enabled: false
+    source_key: bloomberg
+    fetch_linked_pages: false
+
+  - name: prnewswire_news
+    type: news_source
+    enabled: false
+    source_key: prnewswire
+    fetch_linked_pages: true
+    max_linked_pages_per_query: 5
+
+  # 也可以直接配置RSS，例如公司新闻、行业协会动态、PRNewswire分类RSS等。
+  - name: rss_feeds
+    type: rss
+    enabled: false
+    urls:
+      - https://www.prnewswire.com/rss/news-releases-list.rss
+    source_type: press_release
+
+  # -----------------------
+  # 2. 公告：巨潮 / 上交所 / 深交所 / 港交所 / SEC EDGAR
+  # -----------------------
+  - name: cninfo_announcements
+    type: cninfo_announcements
+    enabled: false
+    column: szse
+    page_size: 30
+    max_pages: 2
+    # 巨潮 category 可留空搜索全部，也可填写年报/半年报/一季报等分类代码或名称。
+    categories: []
+    stocks: []
+
+  # 上交所、深交所、港交所网站经常变动，这里先用搜索/列表页连接器；正式环境建议接授权数据源或本地公告PDF导出。
+  - name: sse_announcements_pages
+    type: search_pages
+    enabled: false
+    source_type: official_announcement
+    search_url_templates:
+      - "https://www.sse.com.cn/home/search/?webswd={query}"
+    allowed_domains: ["sse.com.cn", "www.sse.com.cn"]
+    fetch_linked_pages: false
+
+  - name: szse_announcements_pages
+    type: search_pages
+    enabled: false
+    source_type: official_announcement
+    search_url_templates:
+      - "https://www.szse.cn/application/search/index.html?keyword={query}"
+    allowed_domains: ["szse.cn", "www.szse.cn"]
+    fetch_linked_pages: false
+
+  - name: hkex_announcements_pages
+    type: search_pages
+    enabled: false
+    source_type: official_announcement
+    search_url_templates:
+      - "https://www.hkexnews.hk/search/titlesearch.xhtml?lang=zh"
+    allowed_domains: ["hkexnews.hk", "www.hkexnews.hk"]
+    fetch_linked_pages: false
+
+  - name: sec_edgar
+    type: sec_edgar
+    enabled: false
+    tickers: [NVDA, MSFT, AVGO, AMD, AMZN, GOOGL, META]
+    forms: ["10-K", "10-Q", "8-K"]
+    user_agent: "ChainAlpha research contact@example.com"
+    max_filings_per_company: 20
+
+  # -----------------------
+  # 3. 产业信息：公司官网 / 产品发布 / 行业展会 / 标准组织 OFC/OIF/IEEE/JEDEC
+  # -----------------------
+  - name: official_company_pages
+    type: web_pages
+    enabled: false
+    source_type: company_website
+    urls:
+      - https://www.nvidia.com/en-us/data-center/
+      - https://www.broadcom.com/products/ethernet-connectivity/switching
+
+  - name: product_launch_search
+    type: search_pages
+    enabled: false
+    source_type: product_launch
+    search_url_templates:
+      - "https://www.nvidia.com/en-us/search/?q={query}"
+      - "https://www.broadcom.com/search?q={query}"
+    allowed_domains: ["nvidia.com", "www.nvidia.com", "broadcom.com", "www.broadcom.com"]
+    fetch_linked_pages: false
+
+  - name: industry_events_and_standards
+    type: search_pages
+    enabled: false
+    source_type: industry_standard_or_event
+    urls:
+      - https://www.ofcconference.org/
+      - https://www.oiforum.com/
+      - https://www.ieee.org/
+      - https://www.jedec.org/
+    search_url_templates:
+      - "https://www.oiforum.com/?s={query}"
+      - "https://www.jedec.org/search?keys={query}"
+    allowed_domains: ["ofcconference.org", "www.ofcconference.org", "oiforum.com", "www.oiforum.com", "ieee.org", "www.ieee.org", "jedec.org", "www.jedec.org"]
+    fetch_linked_pages: false
+
+  # -----------------------
+  # 4. 财务数据：年报/半年报/季报/调研纪要/电话会纪要
+  #    A股公告用 cninfo_announcements；美股用 sec_edgar；电话会纪要通常需授权源或本地导出。
+  # -----------------------
+  - name: earnings_call_transcripts_local
+    type: local_files
+    enabled: false
+    path: ./data/transcripts
+    patterns: ["*.md", "*.txt", "*.json", "*.jsonl"]
+    source_type: earnings_call_transcript
+    recursive: true
+
+  - name: investor_relations_pages
+    type: search_pages
+    enabled: false
+    source_type: investor_relation
+    search_url_templates:
+      - "https://www.google.com/search?q={query}+investor+relations+transcript"
+    fetch_linked_pages: false
+
+  # -----------------------
+  # 5. 另类数据：招聘 / 专利 / 招投标 / 产能建设 / 项目备案 / 价格 / 进出口
+  # -----------------------
+  - name: patentsview
+    type: patentsview
+    enabled: false
+
+  - name: recruitment_pages
+    type: search_pages
+    enabled: false
+    source_type: recruitment
+    search_url_templates:
+      # 正式环境建议改为公司官网招聘页、BOSS/猎聘/LinkedIn授权导出或本地CSV。
+      - "https://www.google.com/search?q={query}+招聘+岗位+AI+数据中心+光模块"
+    fetch_linked_pages: false
+
+  - name: tender_pages
+    type: search_pages
+    enabled: false
+    source_type: tender
+    search_url_templates:
+      - "https://www.ccgp.gov.cn/cggg/dfgg/zbgg/index.htm"
+      - "https://www.google.com/search?q={query}+招标+中标+数据中心+液冷+光模块"
+    fetch_linked_pages: false
+
+  - name: capacity_project_pages
+    type: search_pages
+    enabled: false
+    source_type: capacity_project
+    search_url_templates:
+      - "https://www.google.com/search?q={query}+项目备案+扩产+产能+数据中心"
+    fetch_linked_pages: false
+
+  - name: stooq_prices
+    type: stooq_prices
+    enabled: false
+    symbols: [nvda.us, msft.us, avgo.us, amd.us]
+
+  - name: import_export_api_placeholder
+    type: json_api
+    enabled: false
+    url: "https://example.com/api/import-export?q={query}"
+    method: GET
+    records_path: "data.items"
+    title_field: "title"
+    content_fields: ["description", "amount", "product", "country"]
+    time_field: "date"
+    source_type: import_export_data
+
+  # -----------------------
+  # 6. 社交舆情：雪球 / 股吧 / 微博 / Reddit / X
+  #    雪球和财联社建议通过 MediaCrawler-main 输出读取。
+  # -----------------------
+  - name: reddit_social
+    type: reddit
+    enabled: false
+    subreddit: null
+    sort: new
+    time: month
+
+  - name: x_recent_search
+    type: x_recent_search
+    enabled: false
+    bearer_token: "${X_BEARER_TOKEN}"
+    max_results: 20
+
+  - name: guba_pages
+    type: search_pages
+    enabled: false
+    source_type: social_media
+    search_url_templates:
+      - "https://so.eastmoney.com/web/s?keyword={query}"
+    allowed_domains: ["eastmoney.com", "guba.eastmoney.com", "so.eastmoney.com"]
+    fetch_linked_pages: false
+
+  - name: weibo_pages
+    type: search_pages
+    enabled: false
+    source_type: social_media
+    search_url_templates:
+      - "https://s.weibo.com/weibo?q={query}"
+    allowed_domains: ["weibo.com", "s.weibo.com"]
+    fetch_linked_pages: false
+
+  # -----------------------
+  # 7. China market / news feeds
+  # -----------------------
+  - name: tencent_quotes
+    type: tencent_quotes
+    enabled: false
+    symbols: ["sz300308", "sz000977", "sh603019"]
+
+  - name: mootdx_quotes
+    type: mootdx_quotes
+    enabled: false
+    symbols: ["300308", "000977", "603019"]
+    offset: 60
+
+  - name: akshare_stock_news
+    type: akshare_news
+    enabled: false
+    dataset: stock_news_em
+    symbols: ["300308", "000977", "603019"]
+
+  - name: akshare_global_eastmoney
+    type: akshare_news
+    enabled: false
+    dataset: stock_info_global_em
+
+  - name: akshare_global_cls
+    type: akshare_news
+    enabled: false
+    dataset: stock_info_global_cls
+
+  - name: mootdx_financials
+    type: mootdx_financials
+    enabled: false
+    symbols: ["300308", "000977", "603019"]
+    downdir: ./data/cache/mootdx_financials
