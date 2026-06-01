@@ -217,6 +217,9 @@ def render_topic_reply(reply: dict[str, Any]) -> str:
     if companies:
         lines.extend(["## 重点公司", ""])
         for idx, item in enumerate(companies, 1):
+            if not isinstance(item, dict):
+                lines.extend([f"### {idx}. {str(item)}", ""])
+                continue
             company = item.get("company") or "Unknown"
             ticker = item.get("ticker") or "-"
             lines.extend([f"### {idx}. {company} ({ticker})", ""])
