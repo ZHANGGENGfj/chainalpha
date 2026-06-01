@@ -126,6 +126,74 @@ def generate_topic_reply(report: dict[str, Any]) -> dict[str, Any]:
     return client.chat_json(SYSTEM_PROMPT, user, timeout=90)
 
 
+def generate_event_signal_markdown(report: dict[str, Any]) -> str:
+    """Use the configured local/OpenAI-compatible LLM to interpret event signals.
+
+    The deterministic rule layer extracts signals; this function turns those
+    signals into investment-language reasoning with evidence strength,
+    verification points, and falsification conditions.
+    """
+    settings = load_settings()
+    client = LLMClient(settings)
+    payload = _event_signal_payload(report)
+    system = """你是一名中文买方/卖方交叉背景的投研分析师。
+你的任务不是复述新闻，而是把结构化事件信号解释成投资研究语言。
+只能使用输入 JSON 中的信息，不得编造订单金额、客户名称、估值倍数、财务预测或外部事实。
+如果证据不足，必须明确写“数据缺口”或“证据强度较弱”。
+输出 Markdown。"""
+    user = f"""
+请基于输入 JSON，为目标公司生成一段更有逻辑的“市场情绪与事件信号 + 情景分析”。
+
+输出必须包含以下结构：
+
+## 六、市场情绪与事件信号
+
+### 1. 情绪判断
+- 解释情绪分数来自哪些事件，而不是只写分数。
+- 判断当前是基本面驱动、事件催化驱动，还是情绪/题材驱动。
+
+### 2. 核心事件分组
+按以下类别分组，不要机械罗列 event code：
+- 正向催化
+- 基本面验证
+- 估值预期差
+- 风险与证伪
+
+### 3. 重点事件解读
+对每个重要事件写清楚：
+- 事件事实
+- 投研含义
+- 影响路径：收入 / 毛利率 / 费用率 / 现金流 / 估值 / 风险
+- 证据强度：强 / 中 / 弱
+- 后续验证点
+- 证伪条件
+
+## 七、情景分析
+
+必须分别写：
+- 未来3个月
+- 未来1年
+- 未来3年
+
+每个时间维度都要包含：
+- 乐观情景
+- 中性情景
+- 悲观情景
+- 需要跟踪的数据
+
+写作要求：
+1. 聚焦目标公司，不要泛泛写整个产业链。
+2. 不要把“相关公司新闻”直接等同于目标公司订单或客户认证。
+3. 对间接新闻要明确说明“间接证据”。
+4. 如果缺少订单金额、客户名称、财务数据、估值倍数，必须写成数据缺口。
+5. 语言要像专业投研备忘录，不要像新闻摘要。
+
+输入 JSON：
+{json.dumps(payload, ensure_ascii=False, indent=2)}
+"""
+    return client.chat_text(system, user, timeout=120)
+
+
 def render_topic_reply(reply: dict[str, Any]) -> str:
     lines = ["# LLM Topic Research Reply", ""]
     summary = str(reply.get("executive_summary") or "").strip()
@@ -164,6 +232,65 @@ def render_topic_reply(reply: dict[str, Any]) -> str:
     if final_note:
         lines.extend(["## 备注", "", final_note, ""])
     return "\n".join(lines).strip() + "\n"
+
+
+def _event_signal_payload(report: dict[str, Any], max_signals: int = 12, max_docs: int = 12) -> dict[str, Any]:
+    companies = report.get("companies") or []
+    primary = companies[0] if companies else {}
+    primary_company = primary.get("company") or {}
+    return {
+        "topic": report.get("topic"),
+        "generated_at": report.get("generated_at"),
+        "target_company": {
+            "name": primary_company.get("name"),
+            "ticker": primary_company.get("ticker"),
+            "industry": primary_company.get("industry"),
+            "role": primary_company.get("role"),
+            "nodes": primary_company.get("nodes") or [],
+        },
+        "sentiment": {
+            "score": report.get("sentiment_score"),
+            "label": report.get("sentiment_label"),
+        },
+        "valuation_view": report.get("valuation_view") or [],
+        "signals": [_signal_dict_brief(item) for item in (report.get("signals") or [])[:max_signals]],
+        "selected_documents": [_doc_dict_brief(item) for item in (report.get("selected_documents") or [])[:max_docs]],
+        "recent_documents": [_doc_dict_brief(item) for item in (report.get("recent_documents") or [])[:max_docs]],
+        "scenarios": report.get("scenarios") or [],
+        "tracking_indicators": report.get("tracking_indicators") or [],
+        "warnings": report.get("warnings") or [],
+    }
+
+
+def _signal_dict_brief(signal: dict[str, Any]) -> dict[str, Any]:
+    event = signal.get("event") or {}
+    hypothesis = signal.get("hypothesis") or {}
+    return {
+        "title": signal.get("title"),
+        "stage": signal.get("stage"),
+        "weak_signal_score": signal.get("weak_signal_score"),
+        "attention_score": signal.get("attention_score"),
+        "event_type": event.get("event_type"),
+        "source_type": event.get("source_type"),
+        "source": event.get("source"),
+        "supply_chain_nodes": event.get("supply_chain_nodes") or [],
+        "evidence": event.get("evidence") or [],
+        "causal_path": hypothesis.get("causal_path") or [],
+        "hypothesis": hypothesis,
+        "risks": signal.get("risks") or [],
+    }
+
+
+def _doc_dict_brief(doc: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "title": doc.get("title"),
+        "source": doc.get("source"),
+        "source_type": doc.get("source_type"),
+        "url": doc.get("url"),
+        "path": doc.get("path"),
+        "published_at": doc.get("published_at"),
+        "content": str(doc.get("content") or "")[:800],
+    }
 
 
 def generate_professional_topic_markdown(report: dict[str, Any]) -> str:

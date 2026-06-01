@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from chainalpha.connectors.base import FetchRequest
+from chainalpha.connectors.base import ConnectorConfig, FetchRequest
 from chainalpha.connectors.document_adapter import source_documents_to_chunks
 from chainalpha.connectors.registry import SourceManager, load_connector_configs
 from chainalpha.investment.a_share_reports import fetch_a_share_report_documents
@@ -23,6 +23,7 @@ from chainalpha.investment.market_data import (
     load_price_snapshots,
     lookup_snapshot,
 )
+from chainalpha.investment.topic_valuation import build_target_valuation_view
 from chainalpha.memory.index import HybridIndex
 from chainalpha.ontology.industry_graph import IndustryGraph
 from chainalpha.pipeline import analyze_chunks
@@ -199,12 +200,23 @@ def build_topic_research_report(
     top_k_docs: int = 12,
     top_k_companies: int = 12,
     top_k_candidates: int = 8,
+    include_a_share_reports: bool = False,
+    focus_target_company: bool = False,
+    media_crawler_root: str | Path | None = None,
+    media_crawler_platforms: list[str] | None = None,
 ) -> TopicResearchReport:
     profiles = resolve_query_profiles(topic, load_company_profiles(company_map))
     intent = _classify_intent(topic, profiles)
     planned_tasks = _build_task_plan(intent)
 
-    manager = _build_dynamic_source_manager(config, profiles, intent, topic)
+    manager = _build_dynamic_source_manager(
+        config,
+        profiles,
+        intent,
+        topic,
+        media_crawler_root=media_crawler_root,
+        media_crawler_platforms=media_crawler_platforms,
+    )
     docs, results = manager.fetch_all(FetchRequest(query=topic, limit=limit))
     warnings = [*manager.errors]
     for result in results:
@@ -241,10 +253,15 @@ def build_topic_research_report(
         prices=price_map,
         matched_nodes=related_nodes + upstream_nodes + downstream_nodes,
         top_k=top_k_companies,
+        focus_target_company=focus_target_company,
     )
 
-    a_share_reports, a_share_warnings = fetch_a_share_report_documents([row.company for row in company_views])
-    warnings.extend(a_share_warnings)
+    a_share_reports: dict[str, list[SourceDocument]] = {}
+    if include_a_share_reports:
+        a_share_reports, a_share_warnings = fetch_a_share_report_documents([row.company for row in company_views])
+        warnings.extend(a_share_warnings)
+    else:
+        warnings.append("A-share filings/PDF parsing disabled. Use --include-a-share-reports to enable financial report parsing.")
     report_docs = [doc for docs in a_share_reports.values() for doc in docs]
     if report_docs:
         report_financials = derive_financial_snapshots(report_docs, [row.company for row in company_views])
@@ -283,7 +300,7 @@ def build_topic_research_report(
         signals=signals,
     )
     core_logic = _build_core_logic(related_nodes, upstream_nodes, downstream_nodes, company_views, signals)
-    valuation_view = _build_valuation_view(company_views, candidates)
+    valuation_view = build_target_valuation_view(company_views, candidates)
     sentiment_score, sentiment_label = _build_sentiment(signals, company_views)
     recommendation = _build_recommendation(candidates, signals, company_views)
     scenarios = _build_scenarios(intent, related_nodes, candidates, recommendation)
@@ -399,6 +416,81 @@ def render_topic_research_markdown(report: TopicResearchReport) -> str:
     return "\n".join(lines)
 
 
+# Final active override: target-company-first valuation view for news-only topic runs.
+def _build_valuation_view(companies: list[TopicCompanyView], candidates: list[InvestmentCandidate]) -> list[str]:
+    items: list[str] = []
+    focus_rows = companies[:3]
+    for row in focus_rows:
+        financial = row.financial
+        price = row.price
+        items.append(f"{row.company.name}: 估值分析聚焦目标公司，不再把产业链相关公司简单并列为投资候选。")
+
+        facts: list[str] = []
+        if financial:
+            if financial.period:
+                facts.append(f"报告期={financial.period}")
+            if financial.revenue_growth is not None:
+                facts.append(f"营收增速={financial.revenue_growth:.1f}%")
+            if financial.profit_growth is not None:
+                facts.append(f"利润增速={financial.profit_growth:.1f}%")
+            if financial.gross_margin is not None:
+                facts.append(f"毛利率={financial.gross_margin:.1f}%")
+            if financial.roe is not None:
+                facts.append(f"ROE={financial.roe:.1f}%")
+            if financial.market_cap is not None:
+                facts.append(f"市值={financial.market_cap:.1f}")
+            valuation_parts = []
+            if financial.pe is not None:
+                valuation_parts.append(f"PE={financial.pe:.1f}")
+            if financial.pb is not None:
+                valuation_parts.append(f"PB={financial.pb:.1f}")
+            if financial.ps is not None:
+                valuation_parts.append(f"PS={financial.ps:.1f}")
+            facts.append("估值倍数=" + (", ".join(valuation_parts) if valuation_parts else "缺失"))
+        else:
+            facts.append("结构化财务数据缺失")
+
+        if price:
+            price_parts = []
+            if price.date:
+                price_parts.append(price.date)
+            if price.close is not None:
+                price_parts.append(f"收盘价={price.close:.2f}")
+            if price.change_1m is not None:
+                price_parts.append(f"1M={price.change_1m:.1f}%")
+            if price.change_3m is not None:
+                price_parts.append(f"3M={price.change_3m:.1f}%")
+            if price.change_6m is not None:
+                price_parts.append(f"6M={price.change_6m:.1f}%")
+            if price.change_12m is not None:
+                price_parts.append(f"12M={price.change_12m:.1f}%")
+            facts.append("行情=" + (", ".join(price_parts) if price_parts else "缺失"))
+        else:
+            facts.append("结构化行情数据缺失")
+
+        items.append(f"{row.company.name}: {'；'.join(facts)}。")
+        if financial is None and price is None:
+            items.extend(
+                [
+                    "当前仅启用新闻/消息输入，不能直接判断估值便宜或昂贵；只能判断消息是否可能改变盈利预期或风险偏好。",
+                    "估值数据缺口：当前市值、PE TTM、PB、PS、过去3-5年估值分位、未来2-3年利润预测、同行估值表。",
+                    "消息驱动估值框架：订单/客户认证/产品放量/毛利改善属于盈利上修线索；单纯热度新闻属于情绪催化，不能直接外推估值空间。",
+                    "情景估值框架：乐观情景=订单持续兑现且估值维持；中性情景=业绩正常增长但估值回归中枢；悲观情景=订单或毛利不及预期导致业绩和估值双杀。",
+                ]
+            )
+        else:
+            items.append(f"{row.company.name}: {_valuation_judgement(financial, price)}")
+
+    if candidates:
+        top = candidates[0]
+        if top.company.name in {row.company.name for row in focus_rows}:
+            items.append(f"{top.company.name}: 候选池评分仅作为辅助，仍需用目标公司估值倍数、盈利预测和新闻证据闭环复核。")
+
+    if not items:
+        items.append("估值信息缺失：未识别到目标公司。请先确认公司名称/股票代码，并补充新闻、行情和估值数据。")
+    return items
+
+
 def render_professional_topic_report(report: TopicResearchReport) -> str:
     lines = [
         f"# {report.topic} 研究报告",
@@ -501,6 +593,81 @@ def render_professional_topic_report(report: TopicResearchReport) -> str:
         "",
     ])
     return "\n".join(lines)
+
+
+# Final override: target-company-first valuation view for news-only topic runs.
+def _build_valuation_view(companies: list[TopicCompanyView], candidates: list[InvestmentCandidate]) -> list[str]:
+    items: list[str] = []
+    focus_rows = companies[:3]
+    for row in focus_rows:
+        financial = row.financial
+        price = row.price
+        items.append(f"{row.company.name}: 估值分析聚焦目标公司，不再把产业链相关公司简单并列为投资候选。")
+
+        facts: list[str] = []
+        if financial:
+            if financial.period:
+                facts.append(f"报告期={financial.period}")
+            if financial.revenue_growth is not None:
+                facts.append(f"营收增速={financial.revenue_growth:.1f}%")
+            if financial.profit_growth is not None:
+                facts.append(f"利润增速={financial.profit_growth:.1f}%")
+            if financial.gross_margin is not None:
+                facts.append(f"毛利率={financial.gross_margin:.1f}%")
+            if financial.roe is not None:
+                facts.append(f"ROE={financial.roe:.1f}%")
+            if financial.market_cap is not None:
+                facts.append(f"市值={financial.market_cap:.1f}")
+            valuation_parts = []
+            if financial.pe is not None:
+                valuation_parts.append(f"PE={financial.pe:.1f}")
+            if financial.pb is not None:
+                valuation_parts.append(f"PB={financial.pb:.1f}")
+            if financial.ps is not None:
+                valuation_parts.append(f"PS={financial.ps:.1f}")
+            facts.append("估值倍数=" + (", ".join(valuation_parts) if valuation_parts else "缺失"))
+        else:
+            facts.append("结构化财务数据缺失")
+
+        if price:
+            price_parts = []
+            if price.date:
+                price_parts.append(price.date)
+            if price.close is not None:
+                price_parts.append(f"收盘价={price.close:.2f}")
+            if price.change_1m is not None:
+                price_parts.append(f"1M={price.change_1m:.1f}%")
+            if price.change_3m is not None:
+                price_parts.append(f"3M={price.change_3m:.1f}%")
+            if price.change_6m is not None:
+                price_parts.append(f"6M={price.change_6m:.1f}%")
+            if price.change_12m is not None:
+                price_parts.append(f"12M={price.change_12m:.1f}%")
+            facts.append("行情=" + (", ".join(price_parts) if price_parts else "缺失"))
+        else:
+            facts.append("结构化行情数据缺失")
+
+        items.append(f"{row.company.name}: {'；'.join(facts)}。")
+        if financial is None and price is None:
+            items.extend(
+                [
+                    "当前仅启用新闻/消息输入，不能直接判断估值便宜或昂贵；只能判断消息是否可能改变盈利预期或风险偏好。",
+                    "估值数据缺口：当前市值、PE TTM、PB、PS、过去3-5年估值分位、未来2-3年利润预测、同行估值表。",
+                    "消息驱动估值框架：订单/客户认证/产品放量/毛利改善属于盈利上修线索；单纯热度新闻属于情绪催化，不能直接外推估值空间。",
+                    "情景估值框架：乐观情景=订单持续兑现且估值维持；中性情景=业绩正常增长但估值回归中枢；悲观情景=订单或毛利不及预期导致业绩和估值双杀。",
+                ]
+            )
+        else:
+            items.append(f"{row.company.name}: {_valuation_judgement(financial, price)}")
+
+    if candidates:
+        top = candidates[0]
+        if top.company.name in {row.company.name for row in focus_rows}:
+            items.append(f"{top.company.name}: 候选池评分仅作为辅助，仍需用目标公司估值倍数、盈利预测和新闻证据闭环复核。")
+
+    if not items:
+        items.append("估值信息缺失：未识别到目标公司。请先确认公司名称/股票代码，并补充新闻、行情和估值数据。")
+    return items
 
 
 def render_professional_topic_report(report: TopicResearchReport) -> str:
@@ -1095,8 +1262,12 @@ def _build_dynamic_source_manager(
     profiles: list[CompanyProfile],
     intent: ResearchIntent,
     topic: str,
+    media_crawler_root: str | Path | None = None,
+    media_crawler_platforms: list[str] | None = None,
 ) -> SourceManager:
     configs = load_connector_configs(config)
+    if media_crawler_root:
+        _enable_or_add_media_crawler(configs, media_crawler_root, media_crawler_platforms)
     auto_profiles = _auto_profiles_for_topic(profiles, intent, topic)
     for cfg in configs:
         if cfg.type == "tencent_quotes":
@@ -1104,6 +1275,37 @@ def _build_dynamic_source_manager(
         elif cfg.type in {"mootdx_quotes", "mootdx_financials", "akshare_news"}:
             _fill_symbols(cfg.params, auto_profiles, mode="plain")
     return SourceManager.from_configs(configs)
+
+
+def _enable_or_add_media_crawler(
+    configs: list[ConnectorConfig],
+    root_dir: str | Path,
+    platforms: list[str] | None = None,
+) -> None:
+    params = {
+        "root_dir": str(root_dir),
+        "platforms": platforms or ["finance_news", "claim_tasks", "cls", "xq"],
+        "modes": ["processed", "raw", "cache"],
+        "keywords": [],
+    }
+    for idx, cfg in enumerate(configs):
+        if cfg.type == "media_crawler":
+            configs[idx] = ConnectorConfig(
+                name=cfg.name,
+                type=cfg.type,
+                enabled=True,
+                params={**cfg.params, **params},
+            )
+            return
+    configs.insert(
+        0,
+        ConnectorConfig(
+            name="media_crawler_finance_news",
+            type="media_crawler",
+            enabled=True,
+            params=params,
+        ),
+    )
 
 
 def _auto_profiles_for_topic(
@@ -1188,6 +1390,7 @@ def _find_related_companies(
     prices: dict[str, PriceSnapshot],
     matched_nodes: list[str],
     top_k: int,
+    focus_target_company: bool = False,
 ) -> list[TopicCompanyView]:
     node_set = set(canonicalize_nodes(matched_nodes))
     scored: dict[str, TopicCompanyView] = {}
@@ -1230,6 +1433,8 @@ def _find_related_companies(
     rows = sorted(scored.values(), key=lambda item: item.match_score, reverse=True)
     if intent.input_type == "company":
         locked = [row for row in rows if row.company.name == intent.target]
+        if focus_target_company and locked:
+            return locked[:1]
         related = [row for row in rows if row.company.name != intent.target]
         return (locked + related)[:top_k]
     return rows[:top_k]

@@ -1,0 +1,23 @@
+sources:
+  - name: media_crawler_finance_news
+    type: media_crawler
+    enabled: true
+    root_dir: ./third_party/MediaCrawler-main/data
+    platforms:
+      - finance_news
+      - claim_tasks
+      - cls
+      - xq
+    modes:
+      - processed
+      - raw
+      - cache
+    keywords: []
+
+  - name: local_raw_files
+    type: local_files
+    enabled: false
+    path: ./data/raw
+    patterns: ["*.md", "*.txt", "*.json", "*.jsonl", "*.csv"]
+    source_type: local_file
+    recursive: true

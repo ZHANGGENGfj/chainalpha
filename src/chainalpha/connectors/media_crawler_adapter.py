@@ -8,9 +8,10 @@ from chainalpha.connectors.base import BaseConnector, FetchRequest, SourceDocume
 from chainalpha.utils.text import normalize_text
 
 
-TITLE_KEYS = ["title", "note_title", "desc", "description", "nickname", "user_name", "keyword"]
+TITLE_KEYS = ["title", "标题", "note_title", "desc", "description", "display_title", "nickname", "user_name", "keyword"]
 CONTENT_KEYS = [
     "content",
+    "内容",
     "note_content",
     "comment_content",
     "text",
@@ -19,9 +20,12 @@ CONTENT_KEYS = [
     "raw_text",
     "display_title",
     "article_content",
+    "摘要",
+    "summary",
 ]
-TIME_KEYS = ["publish_time", "create_time", "created_at", "time", "timestamp", "last_modify_ts"]
-URL_KEYS = ["url", "note_url", "source_url", "href", "web_url"]
+TIME_KEYS = ["publish_time", "发布时间", "时间", "create_time", "created_at", "time", "timestamp", "last_modify_ts"]
+URL_KEYS = ["url", "链接", "note_url", "source_url", "href", "web_url"]
+SOURCE_KEYS = ["source", "来源", "platform", "媒体"]
 
 
 class MediaCrawlerConnector(BaseConnector):
@@ -33,6 +37,8 @@ class MediaCrawlerConnector(BaseConnector):
     - MediaCrawler-main/data/xq/cache/*.json
     - MediaCrawler-main/data/xq/processed/*.json
     - MediaCrawler-main/data/cls/processed/*.json
+    - MediaCrawler-main/data/finance_news/processed/*.json
+    - MediaCrawler-main/data/claim_tasks/**/*.jsonl
 
     This keeps the ChainAlpha pipeline deterministic and avoids browser/session
     side effects inside the data-source layer.
@@ -51,8 +57,8 @@ class MediaCrawlerConnector(BaseConnector):
     ) -> None:
         super().__init__(name, root_dir=str(root_dir), platforms=platforms, modes=modes, keywords=keywords, **params)
         self.root_dir = resolve_path(root_dir)
-        self.platforms = platforms or ["xq", "cls"]
-        self.modes = modes or ["cache", "processed", "raw"]
+        self.platforms = platforms or ["finance_news", "claim_tasks", "xq", "cls"]
+        self.modes = modes or ["processed", "raw", "cache"]
         self.keywords = keywords or []
 
     def fetch(self, request: FetchRequest) -> list[SourceDocument]:
@@ -99,7 +105,9 @@ class MediaCrawlerConnector(BaseConnector):
             if not isinstance(record, dict):
                 record = {"content": str(record)}
             title = self._first(record, TITLE_KEYS) or self._infer_title_from_filename(path)
-            content = self._first(record, CONTENT_KEYS) or json.dumps(record, ensure_ascii=False)
+            content = self._first(record, CONTENT_KEYS)
+            if not content or str(content) == str(title):
+                content = self._compose_content(record)
             url = self._first(record, URL_KEYS)
             published = parse_datetime(self._first(record, TIME_KEYS))
             if not in_date_range(published, request.start_date, request.end_date):
@@ -109,7 +117,7 @@ class MediaCrawlerConnector(BaseConnector):
                 continue
             docs.append(
                 build_source_document(
-                    source=f"media_crawler:{platform}",
+                    source=f"media_crawler:{self._first(record, SOURCE_KEYS) or platform}",
                     source_type=source_type,
                     title=str(title),
                     content=normalize_text(str(content)),
@@ -145,6 +153,16 @@ class MediaCrawlerConnector(BaseConnector):
             if value not in (None, ""):
                 return value
         return None
+
+    def _compose_content(self, record: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for key in ["摘要", "summary", "匹配关键词", "tags", "category", "source", "来源", "url", "链接"]:
+            value = record.get(key)
+            if value not in (None, ""):
+                parts.append(f"{key}: {value}")
+        if parts:
+            return "\n".join(parts)
+        return json.dumps(record, ensure_ascii=False)
 
     def _infer_title_from_filename(self, path: Path) -> str:
         stem = path.stem
