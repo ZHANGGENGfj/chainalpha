@@ -50,6 +50,8 @@ class PlatformEnum(str, Enum):
     OFFICIAL = "official"  # 新增部委动态支持
     CLS = "cls"  # 新增财联社电报支持
     FINANCE_NEWS = "finance_news"
+    CNINFO_REPORTS = "cninfo_reports"
+    BROKER_REPORTS = "broker_reports"
 
 
 class LoginTypeEnum(str, Enum):

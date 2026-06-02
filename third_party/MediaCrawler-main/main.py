@@ -47,6 +47,8 @@ from media_platform.xueqiu import XueQiuCrawler  # 新增雪球支持
 from media_platform.official import OfficialCrawler  # 新增部委动态支持
 from media_platform.cls import CLSCrawler
 from media_platform.finance_news import FinanceNewsCrawler
+from media_platform.cninfo_reports import CninfoReportsCrawler
+from media_platform.broker_reports import BrokerReportsCrawler
 from tools.async_file_writer import AsyncFileWriter
 
 from var import crawler_type_var
@@ -64,7 +66,9 @@ class CrawlerFactory:
         "xq": XueQiuCrawler,  # 新增雪球支持
         "official": OfficialCrawler,  # 新增部委动态支持
         "cls": CLSCrawler,
-        "finance_news": FinanceNewsCrawler
+        "finance_news": FinanceNewsCrawler,
+        "cninfo_reports": CninfoReportsCrawler,
+        "broker_reports": BrokerReportsCrawler,
     }
 
     @staticmethod

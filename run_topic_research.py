@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--media-crawler-platforms",
-        default="finance_news,claim_tasks,cls,xq",
+        default="finance_news,cninfo_reports,broker_reports,claim_tasks,cls,xq",
         help="Comma-separated MediaCrawler data folders to read.",
     )
     parser.add_argument(
@@ -225,66 +225,70 @@ def refresh_mediacrawler_news(args: argparse.Namespace, out_dir: Path, data_root
         return {"ok": False, "error": message}
 
     keywords = build_crawl_keywords(args.topic)
-    command = [
-        args.media_crawler_python,
-        str(script),
-        "--platform",
-        "finance_news",
-        "--type",
-        "search",
-        "--keywords",
-        ",".join(keywords),
-        "--save_data_option",
-        "jsonl",
-        "--headless",
-        "true",
-    ]
+    platforms = ["finance_news", "cninfo_reports", "broker_reports"]
     # main.py / finance_news currently uses the source list inside
     # media_platform.finance_news.client.FinanceNewsClient. --crawl-sources is
     # kept for the older targeted collector and future source filtering.
     _ = args.crawl_sources
     _ = args.crawl_limit_per_source
 
-    print(f"[media-crawler] running main.py finance_news for: {', '.join(keywords)}", flush=True)
-    result = subprocess.run(
-        command,
-        cwd=app_root,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=child_env(),
-    )
-    output = result.stdout + "\n" + result.stderr
-    if result.returncode != 0:
-        if args.require_refresh_news:
-            raise SystemExit(f"MediaCrawler latest-news collection failed:\n{output}")
-        print(f"[media-crawler] refresh failed, continue with local data: {output.strip()[:800]}", flush=True)
-        return {
-            "ok": False,
-            "returncode": result.returncode,
-            "keywords": keywords,
-            "command": command,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-        }
+    results: list[dict] = []
+    all_ok = True
+    for platform in platforms:
+        command = [
+            args.media_crawler_python,
+            str(script),
+            "--platform",
+            platform,
+            "--type",
+            "search",
+            "--keywords",
+            ",".join(keywords),
+            "--save_data_option",
+            "jsonl",
+            "--headless",
+            "true",
+        ]
+        print(f"[media-crawler] running main.py {platform} for: {', '.join(keywords)}", flush=True)
+        result = subprocess.run(
+            command,
+            cwd=app_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=child_env(),
+        )
+        output = result.stdout + "\n" + result.stderr
+        ok = result.returncode == 0
+        all_ok = all_ok and ok
+        if not ok:
+            print(f"[media-crawler] {platform} refresh failed, continue with local data: {output.strip()[:800]}", flush=True)
+        else:
+            print(f"[media-crawler] {platform} refresh done: saved under {data_root / platform}", flush=True)
+        results.append(
+            {
+                "platform": platform,
+                "ok": ok,
+                "returncode": result.returncode,
+                "keywords": keywords,
+                "command": command,
+                "data_dir": str(data_root / platform),
+                "parsed": parse_key_value_output(output),
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
+        )
 
-    parsed = parse_key_value_output(output)
-    print(
-        "[media-crawler] refresh done: "
-        f"finance_news saved under {data_root / 'finance_news'}",
-        flush=True,
-    )
+    if not all_ok and args.require_refresh_news:
+        failed = [item["platform"] for item in results if not item["ok"]]
+        raise SystemExit(f"MediaCrawler collection failed for: {', '.join(failed)}")
+
     return {
-        "ok": True,
-        "returncode": result.returncode,
+        "ok": all_ok,
         "keywords": keywords,
-        "command": command,
         "data_root": str(data_root),
-        "processed_dir": str(data_root / "finance_news" / "processed"),
-        "parsed": parsed,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
+        "platforms": results,
     }
 
 
@@ -337,6 +341,12 @@ def _write_llm_outputs(args: argparse.Namespace, out_dir: Path, report_data: dic
             print("Local report warnings:")
             for item in report_warnings[:10]:
                 print(f"- {item}")
+    elif args.financial_report_dir or args.broker_report_dir:
+        print(
+            "Local report summaries: none. "
+            "Check that --financial-report-dir/--broker-report-dir exist and contain files matching the topic keyword.",
+            flush=True,
+        )
 
     try:
         reply = generate_topic_reply(report_data)

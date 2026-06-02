@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from chainalpha.investment.report_extractors import summarize_financial_report_document
+from chainalpha.investment.report_extractors import (
+    extract_text_from_file,
+    summarize_broker_report_text,
+    summarize_financial_report_document,
+)
 
 
 def build_professional_evidence_pack(
@@ -26,8 +30,9 @@ def build_professional_evidence_pack(
         for doc in a_share_docs[:max_a_share_reports]
         if isinstance(doc, dict)
     ]
-    financial_summaries = [*a_share_summaries, *(local_financial_summaries or [])]
-    broker_summaries = broker_report_summaries or []
+    media_crawler_financial_summaries = _media_crawler_financial_summaries(docs, limit=max_a_share_reports)
+    financial_summaries = [*a_share_summaries, *media_crawler_financial_summaries, *(local_financial_summaries or [])]
+    broker_summaries = [*_media_crawler_broker_summaries(docs), *(broker_report_summaries or [])]
 
     warnings = list(report.get("warnings") or [])
     if financial and _snapshot_confidence(financial) == "low":
@@ -56,7 +61,8 @@ def build_professional_evidence_pack(
             "key_products": primary.get("key_products") or [],
             "upstream_nodes": primary.get("upstream_nodes") or [],
             "downstream_nodes": primary.get("downstream_nodes") or [],
-            "note": "上下游节点来自系统产业链图谱，只能用于分析传导路径，不能自动视为目标公司的客户或供应商事实。",
+            "corrected_chain_logic": _corrected_chain_logic(company, primary),
+            "note": "原始上下游节点来自系统产业链图谱，只能用于分析传导路径，不能自动视为目标公司的客户或供应商事实；写报告时优先使用 corrected_chain_logic。",
         },
         "peer_or_chain_companies": {
             "upstream_companies": primary.get("upstream_companies") or [],
@@ -76,7 +82,8 @@ def build_professional_evidence_pack(
         },
         "scenarios": report.get("scenarios") or [],
         "tracking_indicators": report.get("tracking_indicators") or [],
-        "data_quality_warnings": warnings,
+        "data_quality_warnings": _humanize_warnings(warnings),
+        "writing_guardrails": _writing_guardrails(),
         "mandatory_data_gaps": _mandatory_data_gaps(financial, price, financial_summaries, broker_summaries),
     }
 
@@ -128,6 +135,83 @@ def _doc_pack(doc: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _media_crawler_financial_summaries(docs: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for doc in docs:
+        metadata = doc.get("metadata") or {}
+        if metadata.get("platform") != "cninfo_reports":
+            continue
+        record = metadata.get("record") or {}
+        pdf_path = record.get("pdf_path") or record.get("pdf_path".upper())
+        resolved_pdf = _resolve_media_crawler_pdf_path(pdf_path, metadata.get("file"))
+        if resolved_pdf:
+            try:
+                text = extract_text_from_file(resolved_pdf)
+            except Exception:
+                text = ""
+            if text:
+                doc = {
+                    **doc,
+                    "content": text,
+                    "path": str(resolved_pdf),
+                    "metadata": {**metadata, "pdf_cached_path": str(resolved_pdf)},
+                }
+        summaries.append(summarize_financial_report_document(doc))
+        if len(summaries) >= limit:
+            break
+    return summaries
+
+
+def _media_crawler_broker_summaries(docs: list[dict[str, Any]], *, limit: int = 8) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for doc in docs:
+        metadata = doc.get("metadata") or {}
+        if metadata.get("platform") != "broker_reports":
+            continue
+        record = metadata.get("record") or {}
+        title = str(doc.get("title") or record.get("标题") or "机构研报")
+        text = "\n".join(
+            part
+            for part in [
+                str(doc.get("content") or ""),
+                str(record.get("content") or ""),
+                str(record.get("raw") or ""),
+            ]
+            if part
+        )
+        summaries.append(
+            summarize_broker_report_text(
+                title=title,
+                text=text,
+                source=str(doc.get("source") or "media_crawler:broker_reports"),
+                path=str(doc.get("path") or ""),
+            )
+        )
+        if len(summaries) >= limit:
+            break
+    return summaries
+
+
+def _resolve_media_crawler_pdf_path(value: Any, source_file: Any) -> str | None:
+    if not value:
+        return None
+    from pathlib import Path
+
+    raw = Path(str(value))
+    candidates = [raw]
+    if source_file:
+        file_path = Path(str(source_file))
+        parents = list(file_path.parents)
+        if len(parents) >= 4:
+            candidates.append(parents[3] / raw)
+        if len(parents) >= 3:
+            candidates.append(parents[2] / raw)
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def _signal_pack(signal: dict[str, Any]) -> dict[str, Any]:
     event = signal.get("event") or {}
     hypothesis = signal.get("hypothesis") or {}
@@ -176,3 +260,55 @@ def _mandatory_data_gaps(
         gaps.append("机构研报共识、盈利预测均值/高低值、估值假设缺失。")
     gaps.append("历史估值分位、同行估值表、三年盈利预测和敏感性分析需要结构化数据源补充。")
     return list(dict.fromkeys(gaps))
+
+
+def _corrected_chain_logic(company: dict[str, Any], primary: dict[str, Any]) -> dict[str, Any]:
+    nodes = set(company.get("nodes") or [])
+    industry = str(company.get("industry") or "").lower()
+    if "Optical Module" in nodes or "optical" in industry:
+        return {
+            "target_position": "高速光模块/光通信收发模块环节。",
+            "demand_driver": "AI CapEx、GPU/AI服务器集群扩张、交换机端口速率升级会传导至高速光模块需求。",
+            "upstream_supply": ["光芯片/激光器", "电芯片/DSP", "硅光/光器件", "PCB/结构件", "产能与良率"],
+            "direct_downstream": ["云厂商/AI数据中心", "交换机与通信设备商", "服务器/数据中心网络集成链条"],
+            "not_upstream_or_downstream_fact": [
+                "GPU集群是终端需求传导源，不应写成目标公司的直接上游供应商。",
+                "激光器/光器件通常更偏光模块上游供应链，不应机械写成下游客户。",
+                "产业链相关公司不等于客户、供应商或可比公司，除非新闻、公告或研报明确证明。",
+            ],
+            "raw_graph_nodes": {
+                "upstream_nodes": primary.get("upstream_nodes") or [],
+                "downstream_nodes": primary.get("downstream_nodes") or [],
+            },
+        }
+    return {
+        "target_position": "以目标公司的公开业务和节点为准。",
+        "raw_graph_nodes": {
+            "upstream_nodes": primary.get("upstream_nodes") or [],
+            "downstream_nodes": primary.get("downstream_nodes") or [],
+        },
+        "not_upstream_or_downstream_fact": ["产业链图谱节点仅代表传导关系，不代表实际客户或供应商。"],
+    }
+
+
+def _writing_guardrails() -> list[str]:
+    return [
+        "不要在报告正文出现 news_evidence、signals、financial_snapshot、broker_report_summaries、data_quality_warnings 等程序字段名。",
+        "没有证据时，禁止写具体客户名称，例如英伟达、微软、华为、阿里云等。",
+        "没有证据时，禁止写具体阈值或时间点，例如800G渗透率30%、良率60%、全球份额15%、2026年Q2放量等。",
+        "没有证据时，禁止写具体竞争结论，例如某公司压制目标公司、目标公司份额提升至某比例。",
+        "缺少硬数据时，应写验证框架和需要补充的数据，而不是举未经证实的数字例子。",
+    ]
+
+
+def _humanize_warnings(warnings: list[str]) -> list[str]:
+    out: list[str] = []
+    for warning in warnings:
+        text = str(warning)
+        if "ProxyError" in text or "ConnectionError" in text or "PermissionError" in text:
+            out.append("部分联网数据源访问失败，相关财报、行情或公告需要本地文件/结构化数据源补充。")
+        elif "A-share filings/PDF parsing disabled" in text:
+            out.append("本次未启用或未成功获取A股公告/PDF解析，财报事实需要用本地财报或巨潮公告补充。")
+        else:
+            out.append(text)
+    return list(dict.fromkeys(out))

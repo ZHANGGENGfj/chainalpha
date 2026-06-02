@@ -57,7 +57,7 @@ class MediaCrawlerConnector(BaseConnector):
     ) -> None:
         super().__init__(name, root_dir=str(root_dir), platforms=platforms, modes=modes, keywords=keywords, **params)
         self.root_dir = resolve_path(root_dir)
-        self.platforms = platforms or ["finance_news", "claim_tasks", "xq", "cls"]
+        self.platforms = platforms or ["finance_news", "cninfo_reports", "broker_reports", "claim_tasks", "xq", "cls"]
         self.modes = modes or ["processed", "raw", "cache"]
         self.keywords = keywords or []
 
@@ -100,7 +100,7 @@ class MediaCrawlerConnector(BaseConnector):
         except Exception:
             return []
         docs: list[SourceDocument] = []
-        source_type = "social_media" if platform in {"xq", "dy", "ks", "bili", "wb"} else "mainstream_media"
+        source_type = _platform_source_type(platform)
         for idx, record in enumerate(records):
             if not isinstance(record, dict):
                 record = {"content": str(record)}
@@ -169,3 +169,13 @@ class MediaCrawlerConnector(BaseConnector):
         if "_" in stem:
             return stem.split("_", 1)[-1]
         return stem
+
+
+def _platform_source_type(platform: str) -> str:
+    if platform in {"xq", "dy", "ks", "bili", "wb"}:
+        return "social_media"
+    if platform == "cninfo_reports":
+        return "official_announcement"
+    if platform == "broker_reports":
+        return "broker_research_report"
+    return "mainstream_media"

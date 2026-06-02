@@ -5,6 +5,8 @@ sources:
     root_dir: ./third_party/MediaCrawler-main/data
     platforms:
       - finance_news
+      - cninfo_reports
+      - broker_reports
       - claim_tasks
       - cls
       - xq

@@ -444,6 +444,8 @@ def generate_professional_topic_markdown(report: dict[str, Any]) -> str:
 禁止输出 <think>、思考过程、JSON 或代码。禁止编造事实、客户、订单金额、估值倍数、预测数值、市场份额、关键时间点。
 如果字段标记为 low confidence，只能写成“待核验线索”，不能当成确定事实。
 如果缺少硬数据，写“数据缺口”，但仍要用已有新闻和信号解释商业逻辑、验证路径和证伪条件。
+禁止在报告正文出现输入 JSON 的程序字段名，例如 news_evidence、signals、financial_snapshot、broker_report_summaries、data_quality_warnings。
+没有证据时，禁止写具体客户名称、具体百分比阈值、具体年份/季度节点、具体市场份额或具体订单节奏。
 目标是写成有逻辑的投研备忘录，不是机械模板填空。"""
     user = f"""
 请基于输入 JSON 写一份专业中文 Markdown 投资研究报告。
@@ -745,10 +747,12 @@ def generate_evidence_based_professional_topic_markdown(
 2. 优先使用 target_company、business_model、financial_snapshot、price_snapshot、valuation_view、news_evidence、signals。
 3. financial_report_summaries 是从财报/PDF抽出的摘要卡片；broker_report_summaries 是从机构研报抽出的观点卡片。可以引用这些卡片，但精确数值必须说明需要回到原文复核。
 4. financial_snapshot / price_snapshot 如果 confidence=low，只能作为待核验线索，不能写成最新财报或真实行情结论。
-5. 不要把 peer_or_chain_companies 的业务写成 target_company 的业务。
-6. 对每个关键判断尽量写清楚：事实依据、投研含义、后续验证点、证伪条件。
-7. 估值和盈利预测没有硬数据时，写“分析框架 + 数据缺口”，不要编造 PE、EPS、净利润预测。
-8. 附录必须列出使用到的数据来源和数据质量提示。
+5. business_model.corrected_chain_logic 优先级高于原始 upstream_nodes/downstream_nodes；尤其光模块公司不能把 GPU 集群写成直接上游，也不能把激光器/光器件机械写成下游客户。
+6. 不要把 peer_or_chain_companies 的业务写成 target_company 的业务。
+7. 对每个关键判断尽量写清楚：事实依据、投研含义、后续验证点、证伪条件。
+8. 估值和盈利预测没有硬数据时，写“分析框架 + 数据缺口”，不要编造 PE、EPS、净利润预测。
+9. 如果缺少客户、订单、良率、份额、时间点证据，只能写“需核验客户/订单/良率/份额/时间点”，不能举具体公司名或具体数值例子。
+10. 附录必须用自然语言列出数据来源和数据质量提示，不要出现程序字段名。
 
 输入 JSON：
 {json.dumps(payload, ensure_ascii=False, indent=2)}
