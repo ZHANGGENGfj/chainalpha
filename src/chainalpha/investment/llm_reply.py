@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from chainalpha.config import load_settings
+from chainalpha.investment.evidence_pack import build_professional_evidence_pack
 from chainalpha.nlp.llm_client import LLMClient
 from chainalpha.schemas import InvestmentCandidate, WeakSignal
 
@@ -426,6 +427,331 @@ Write polished Markdown with a formal research-report tone. The report must be a
 
 输入 JSON：
 {json.dumps(report, ensure_ascii=False, indent=2)}
+"""
+    return client.chat_text(system, user, timeout=180)
+
+
+def generate_professional_topic_markdown(report: dict[str, Any]) -> str:
+    """Final active professional-report prompt.
+
+    Keep this definition at the end of the module: earlier versions are legacy
+    prompt attempts and Python will use the last definition.
+    """
+    settings = load_settings()
+    client = LLMClient(settings)
+    payload = _professional_report_payload(report)
+    system = """你是严谨的中文卖方投研分析师。你必须只使用输入 JSON 里的证据写报告。
+禁止输出 <think>、思考过程、JSON 或代码。禁止编造事实、客户、订单金额、估值倍数、预测数值、市场份额、关键时间点。
+如果字段标记为 low confidence，只能写成“待核验线索”，不能当成确定事实。
+如果缺少硬数据，写“数据缺口”，但仍要用已有新闻和信号解释商业逻辑、验证路径和证伪条件。
+目标是写成有逻辑的投研备忘录，不是机械模板填空。"""
+    user = f"""
+请基于输入 JSON 写一份专业中文 Markdown 投资研究报告。
+
+必须严格使用以下 12 个一级章节，标题、编号、顺序不能改变：
+## 1. 核心结论
+## 2. 公司概况与商业模式
+## 3. 近期事件与市场表现
+## 4. 财务深度分析
+## 5. 行业与产业链分析
+## 6. 竞争格局
+## 7. 估值分析
+## 8. 盈利预测
+## 9. 预期差与催化剂
+## 10. 风险与证伪条件
+## 11. 跟踪指标仪表盘
+## 12. 附录
+
+写作要求：
+1. 每个章节都要有内容；缺少硬数据时，不要只写一句“数据缺口”，要说明“当前已有证据能支持什么、不能支持什么、下一步需要补什么”。
+2. 优先使用 target_company、business_model、financial_snapshot、price_snapshot、valuation_view、news_evidence、signals。
+3. financial_snapshot / price_snapshot 如果 confidence=low，只能作为待核验线索，不能写成最新财报或真实行情结论。
+4. 不要把 peer_or_chain_companies 的业务写成 target_company 的业务。
+5. 对每个关键判断尽量写清楚：事实依据、投研含义、后续验证点、证伪条件。
+6. 估值和盈利预测没有硬数据时，写“分析框架 + 数据缺口”，不要编造 PE、EPS、净利润预测。
+7. 附录必须列出使用到的数据来源和数据质量提示。
+
+输入 JSON：
+{json.dumps(payload, ensure_ascii=False, indent=2)}
+"""
+    return client.chat_text(system, user, timeout=180)
+
+
+def generate_professional_topic_markdown(report: dict[str, Any]) -> str:
+    """Final active professional-report prompt.
+
+    Keep this definition at the end of the module: earlier versions are legacy
+    prompt attempts and Python will use the last definition.
+    """
+    settings = load_settings()
+    client = LLMClient(settings)
+    payload = _professional_report_payload(report)
+    system = """你是严谨的中文卖方投研分析师。你必须只使用输入 JSON 里的证据写报告。
+禁止输出 <think>、思考过程、JSON 或代码。禁止编造事实、客户、订单金额、估值倍数、预测数值、市场份额、关键时间点。
+如果字段标记为 low confidence，只能写成“待核验线索”，不能当成确定事实。
+如果缺少硬数据，写“数据缺口”，但仍要用已有新闻和信号解释商业逻辑、验证路径和证伪条件。
+目标是写成有逻辑的投研备忘录，不是机械模板填空。"""
+    user = f"""
+请基于输入 JSON 写一份专业中文 Markdown 投资研究报告。
+
+必须严格使用以下 12 个一级章节，标题、编号、顺序不能改变：
+## 1. 核心结论
+## 2. 公司概况与商业模式
+## 3. 近期事件与市场表现
+## 4. 财务深度分析
+## 5. 行业与产业链分析
+## 6. 竞争格局
+## 7. 估值分析
+## 8. 盈利预测
+## 9. 预期差与催化剂
+## 10. 风险与证伪条件
+## 11. 跟踪指标仪表盘
+## 12. 附录
+
+写作要求：
+1. 每个章节都要有内容；缺少硬数据时，不要只写一句“数据缺口”，要说明“当前已有证据能支持什么、不能支持什么、下一步需要补什么”。
+2. 优先使用 target_company、business_model、financial_snapshot、price_snapshot、valuation_view、news_evidence、signals。
+3. financial_snapshot / price_snapshot 如果 confidence=low，只能作为待核验线索，不能写成最新财报或真实行情结论。
+4. 不要把 peer_or_chain_companies 的业务写成 target_company 的业务。
+5. 对每个关键判断尽量写清楚：事实依据、投研含义、后续验证点、证伪条件。
+6. 估值和盈利预测没有硬数据时，写“分析框架 + 数据缺口”，不要编造 PE、EPS、净利润预测。
+7. 附录必须列出使用到的数据来源和数据质量提示。
+
+输入 JSON：
+{json.dumps(payload, ensure_ascii=False, indent=2)}
+"""
+    return client.chat_text(system, user, timeout=180)
+
+
+def generate_professional_topic_markdown(report: dict[str, Any]) -> str:
+    """Generate the strict 12-section professional report from an evidence pack.
+
+    This final definition intentionally overrides the older prompt variants
+    above. The model receives a compact, labeled evidence pack instead of the
+    entire raw report dict, which reduces hallucination and makes available
+    financial/news fields easier to use.
+    """
+    settings = load_settings()
+    client = LLMClient(settings)
+    payload = _professional_report_payload(report)
+    system = """你是严谨的中文卖方投研分析师。你必须只使用输入 JSON 里的证据写报告。
+禁止输出 <think>、思考过程、JSON 或代码。禁止编造事实、客户、订单金额、估值倍数、预测数值、市场份额、关键时间点。
+如果字段标记为 low confidence，只能写成“待核验线索”，不能当成确定事实。
+如果缺少硬数据，写“数据缺口”，但仍要用已有新闻和信号解释商业逻辑、验证路径和证伪条件。
+目标是写成有逻辑的投研备忘录，不是机械模板填空。"""
+    user = f"""
+请基于输入 JSON 写一份专业中文 Markdown 投资研究报告。
+
+必须严格使用以下 12 个一级章节，标题、编号、顺序不能改变：
+## 1. 核心结论
+## 2. 公司概况与商业模式
+## 3. 近期事件与市场表现
+## 4. 财务深度分析
+## 5. 行业与产业链分析
+## 6. 竞争格局
+## 7. 估值分析
+## 8. 盈利预测
+## 9. 预期差与催化剂
+## 10. 风险与证伪条件
+## 11. 跟踪指标仪表盘
+## 12. 附录
+
+写作要求：
+1. 每个章节都要有内容；缺少硬数据时，不要只写一句“数据缺口”，要说明“当前已有证据能支持什么、不能支持什么、下一步需要补什么”。
+2. 优先使用 target_company、business_model、financial_snapshot、price_snapshot、valuation_view、news_evidence、signals。
+3. financial_snapshot / price_snapshot 如果 confidence=low，只能作为待核验线索，不能写成最新财报或真实行情结论。
+4. 不要把 peer_or_chain_companies 的业务写成 target_company 的业务。
+5. 对每个关键判断尽量写清楚：事实依据、投研含义、后续验证点、证伪条件。
+6. 估值和盈利预测没有硬数据时，写“分析框架 + 数据缺口”，不要编造 PE、EPS、净利润预测。
+7. 附录必须列出使用到的数据来源和数据质量提示。
+
+输入 JSON：
+{json.dumps(payload, ensure_ascii=False, indent=2)}
+"""
+    return client.chat_text(system, user, timeout=180)
+
+
+def _professional_report_payload(report: dict[str, Any], max_docs: int = 12, max_signals: int = 10) -> dict[str, Any]:
+    companies = report.get("companies") or []
+    primary = companies[0] if companies else {}
+    company = primary.get("company") or {}
+    financial = primary.get("financial")
+    price = primary.get("price")
+    docs = _dedup_docs([*(report.get("selected_documents") or []), *(report.get("recent_documents") or [])])[:max_docs]
+    signals = (report.get("signals") or [])[:max_signals]
+    warnings = list(report.get("warnings") or [])
+    if financial and _snapshot_confidence(financial) == "low":
+        warnings.append("财务快照来自新闻/社交文本规则抽取，不能等同于财报数据库；报告中只能作为待核验线索。")
+    if price and _snapshot_confidence(price) == "low":
+        warnings.append("行情快照来自新闻文本规则抽取，不能等同于行情数据库；报告中只能作为待核验线索。")
+
+    return {
+        "topic": report.get("topic"),
+        "generated_at": report.get("generated_at"),
+        "target_company": {
+            "name": company.get("name"),
+            "ticker": company.get("ticker"),
+            "exchange": company.get("exchange"),
+            "industry": company.get("industry"),
+            "role": company.get("role"),
+            "nodes": company.get("nodes") or [],
+            "aliases": company.get("aliases") or [],
+        },
+        "business_model": {
+            "business_summary": primary.get("business_summary"),
+            "key_products": primary.get("key_products") or [],
+            "upstream_nodes": primary.get("upstream_nodes") or [],
+            "downstream_nodes": primary.get("downstream_nodes") or [],
+            "note": "上下游节点来自系统产业链图谱，只能用于分析传导路径，不能自动视为目标公司的客户或供应商事实。",
+        },
+        "peer_or_chain_companies": {
+            "upstream_companies": primary.get("upstream_companies") or [],
+            "downstream_companies": primary.get("downstream_companies") or [],
+            "note": "这些公司是产业链相关公司，不等于目标公司可比估值表，除非新闻证据明确支持。",
+        },
+        "financial_snapshot": _snapshot_pack(financial),
+        "price_snapshot": _snapshot_pack(price),
+        "valuation_view": report.get("valuation_view") or [],
+        "news_evidence": [_doc_pack(doc) for doc in docs],
+        "signals": [_signal_dict_brief(sig) for sig in signals],
+        "sentiment": {
+            "score": report.get("sentiment_score"),
+            "label": report.get("sentiment_label"),
+        },
+        "scenarios": report.get("scenarios") or [],
+        "tracking_indicators": report.get("tracking_indicators") or [],
+        "data_quality_warnings": warnings,
+        "mandatory_data_gaps": _mandatory_data_gaps(financial, price),
+    }
+
+
+def _snapshot_pack(snapshot: Any) -> dict[str, Any] | None:
+    if not snapshot:
+        return None
+    if isinstance(snapshot, dict):
+        data = dict(snapshot)
+    else:
+        data = dict(getattr(snapshot, "__dict__", {}))
+    return {
+        "confidence": _snapshot_confidence(data),
+        "usable_as": "待核验线索" if _snapshot_confidence(data) == "low" else "结构化数据",
+        "data": data,
+    }
+
+
+def _snapshot_confidence(snapshot: Any) -> str:
+    metadata = (snapshot or {}).get("metadata") if isinstance(snapshot, dict) else getattr(snapshot, "metadata", {})
+    source_type = str((metadata or {}).get("source_type") or "").lower()
+    provider = str((metadata or {}).get("provider") or "").lower()
+    trusted_tokens = ("financial", "price_data", "quote", "mootdx", "akshare", "tushare", "announcement", "filing")
+    return "high" if any(token in source_type or token in provider for token in trusted_tokens) else "low"
+
+
+def _dedup_docs(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for doc in docs:
+        key = str(doc.get("url") or doc.get("title") or doc.get("id") or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(doc)
+    return out
+
+
+def _doc_pack(doc: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "title": doc.get("title"),
+        "source": doc.get("source"),
+        "source_type": doc.get("source_type"),
+        "published_at": doc.get("published_at"),
+        "url": doc.get("url"),
+        "content_excerpt": str(doc.get("content") or "")[:1000],
+        "metadata_hint": {
+            "platform": (doc.get("metadata") or {}).get("platform"),
+            "file": (doc.get("metadata") or {}).get("file"),
+        },
+    }
+
+
+def _mandatory_data_gaps(financial: Any, price: Any) -> list[str]:
+    gaps: list[str] = []
+    if not financial or _snapshot_confidence(financial) == "low":
+        gaps.extend([
+            "最新年报/季报的营业收入、归母净利润、扣非净利润、毛利率、净利率、ROE。",
+            "经营现金流、存货、应收账款、资产负债率、资本开支等利润质量指标。",
+        ])
+    else:
+        data = financial if isinstance(financial, dict) else getattr(financial, "__dict__", {})
+        for label, key in [
+            ("报告期", "period"),
+            ("经营现金流", "operating_cash_flow"),
+            ("资产负债率", "debt_ratio"),
+            ("ROE", "roe"),
+            ("PE", "pe"),
+            ("PS", "ps"),
+        ]:
+            if data.get(key) is None:
+                gaps.append(f"{label}缺失。")
+    if not price or _snapshot_confidence(price) == "low":
+        gaps.append("真实行情快照、近1/3/6/12个月涨跌幅、资金流向数据缺失。")
+    gaps.append("历史估值分位、同行估值表、三年盈利预测和敏感性分析需要结构化数据源补充。")
+    return gaps
+
+
+def generate_evidence_based_professional_topic_markdown(
+    report: dict[str, Any],
+    *,
+    local_financial_summaries: list[dict[str, Any]] | None = None,
+    broker_report_summaries: list[dict[str, Any]] | None = None,
+) -> str:
+    """Generate a professional report from a compact evidence pack.
+
+    This uniquely named entry point avoids the legacy duplicate
+    ``generate_professional_topic_markdown`` definitions that still exist in
+    this module.
+    """
+    settings = load_settings()
+    client = LLMClient(settings)
+    payload = build_professional_evidence_pack(
+        report,
+        local_financial_summaries=local_financial_summaries,
+        broker_report_summaries=broker_report_summaries,
+    )
+    system = """你是严谨的中文卖方投研分析师。你必须只使用输入 JSON 里的证据写报告。
+禁止输出 <think>、思考过程、JSON 或代码。禁止编造事实、客户、订单金额、估值倍数、预测数值、市场份额、关键时间点。
+如果字段标记为 low confidence，只能写成“待核验线索”，不能当成确定事实。
+如果缺少硬数据，写“数据缺口”，但仍要用已有新闻和信号解释商业逻辑、验证路径和证伪条件。
+目标是写成有逻辑的投研备忘录，不是机械模板填空。"""
+    user = f"""
+请基于输入 JSON 写一份专业中文 Markdown 投资研究报告。
+
+必须严格使用以下 12 个一级章节，标题、编号、顺序不能改变：
+## 1. 核心结论
+## 2. 公司概况与商业模式
+## 3. 近期事件与市场表现
+## 4. 财务深度分析
+## 5. 行业与产业链分析
+## 6. 竞争格局
+## 7. 估值分析
+## 8. 盈利预测
+## 9. 预期差与催化剂
+## 10. 风险与证伪条件
+## 11. 跟踪指标仪表盘
+## 12. 附录
+
+写作要求：
+1. 每个章节都要有内容；缺少硬数据时，不要只写一句“数据缺口”，要说明“当前已有证据能支持什么、不能支持什么、下一步需要补什么”。
+2. 优先使用 target_company、business_model、financial_snapshot、price_snapshot、valuation_view、news_evidence、signals。
+3. financial_report_summaries 是从财报/PDF抽出的摘要卡片；broker_report_summaries 是从机构研报抽出的观点卡片。可以引用这些卡片，但精确数值必须说明需要回到原文复核。
+4. financial_snapshot / price_snapshot 如果 confidence=low，只能作为待核验线索，不能写成最新财报或真实行情结论。
+5. 不要把 peer_or_chain_companies 的业务写成 target_company 的业务。
+6. 对每个关键判断尽量写清楚：事实依据、投研含义、后续验证点、证伪条件。
+7. 估值和盈利预测没有硬数据时，写“分析框架 + 数据缺口”，不要编造 PE、EPS、净利润预测。
+8. 附录必须列出使用到的数据来源和数据质量提示。
+
+输入 JSON：
+{json.dumps(payload, ensure_ascii=False, indent=2)}
 """
     return client.chat_text(system, user, timeout=180)
 

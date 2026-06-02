@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -17,6 +19,15 @@ class LLMClient:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+
+    def _post(self, url: str, headers: dict[str, str], payload: dict[str, Any], timeout: int) -> requests.Response:
+        session = requests.Session()
+        host = urlparse(url).hostname or ""
+        if host in {"127.0.0.1", "localhost"}:
+            # Local vLLM/Ollama endpoints should not be routed through an
+            # inherited corporate/VPN proxy such as 127.0.0.1:7897.
+            session.trust_env = False
+        return session.post(url, headers=headers, json=payload, timeout=timeout)
 
     def chat_json(self, system: str, user: str, timeout: int = 60) -> dict[str, Any]:
         if not self.settings.openai_api_key:
@@ -36,9 +47,9 @@ class LLMClient:
             ],
             "response_format": {"type": "json_object"},
         }
-        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        resp = self._post(url, headers, payload, timeout)
         resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
+        content = _strip_thinking(resp.json()["choices"][0]["message"]["content"])
         try:
             return json.loads(content)
         except json.JSONDecodeError:
@@ -66,6 +77,11 @@ class LLMClient:
                 {"role": "user", "content": user},
             ],
         }
-        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        resp = self._post(url, headers, payload, timeout)
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
+        return _strip_thinking(resp.json()["choices"][0]["message"]["content"])
+
+
+def _strip_thinking(text: str) -> str:
+    cleaned = re.sub(r"<think>.*?</think>", "", str(text), flags=re.IGNORECASE | re.DOTALL)
+    return cleaned.strip()

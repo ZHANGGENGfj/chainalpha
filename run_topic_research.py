@@ -15,10 +15,11 @@ from chainalpha.investment.daily_market_scan_enhanced import (
 )
 from chainalpha.investment.llm_reply import (
     generate_event_signal_markdown,
-    generate_professional_topic_markdown,
+    generate_evidence_based_professional_topic_markdown,
     generate_topic_reply,
     render_topic_reply,
 )
+from chainalpha.investment.report_extractors import load_local_report_summaries
 from chainalpha.investment.topic_report import (
     build_topic_research_report,
     render_professional_topic_report,
@@ -75,6 +76,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--company-map", type=Path, default=Path("./configs/company_map.yaml"), help="Company mapping YAML.")
     parser.add_argument("--financials", type=Path, default=None, help="Optional financial snapshot CSV. Leave empty to avoid sample data.")
     parser.add_argument("--prices", type=Path, default=None, help="Optional price snapshot CSV. Leave empty to avoid sample data.")
+    parser.add_argument("--financial-report-dir", type=Path, default=None, help="Optional local annual/quarterly report PDF/text directory or file.")
+    parser.add_argument("--broker-report-dir", type=Path, default=None, help="Optional local broker/institution research report PDF/text directory or file.")
     parser.add_argument("--run-dir", type=Path, default=Path("./data/topic_runs"), help="Output directory.")
     parser.add_argument("--limit", type=int, default=80, help="Maximum source documents to fetch.")
     parser.add_argument("--top-k-chunks", type=int, default=60, help="Top chunks to analyze.")
@@ -310,6 +313,31 @@ def child_env() -> dict[str, str]:
 
 
 def _write_llm_outputs(args: argparse.Namespace, out_dir: Path, report_data: dict) -> None:
+    financial_summaries, broker_summaries, report_warnings = load_local_report_summaries(
+        topic=args.topic,
+        financial_report_dir=args.financial_report_dir,
+        broker_report_dir=args.broker_report_dir,
+    )
+    if financial_summaries or broker_summaries or report_warnings:
+        report_summary_path = out_dir / "local_report_summaries.json"
+        report_summary_path.write_text(
+            json.dumps(
+                {
+                    "financial_report_summaries": financial_summaries,
+                    "broker_report_summaries": broker_summaries,
+                    "warnings": report_warnings,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print(f"Local report summaries: {report_summary_path}")
+        if report_warnings:
+            print("Local report warnings:")
+            for item in report_warnings[:10]:
+                print(f"- {item}")
+
     try:
         reply = generate_topic_reply(report_data)
     except Exception as exc:
@@ -337,7 +365,11 @@ def _write_llm_outputs(args: argparse.Namespace, out_dir: Path, report_data: dic
     except Exception as exc:
         print(f"LLM event signal analysis failed: {type(exc).__name__}: {exc}")
     try:
-        llm_professional_markdown = generate_professional_topic_markdown(report_data)
+        llm_professional_markdown = generate_evidence_based_professional_topic_markdown(
+            report_data,
+            local_financial_summaries=financial_summaries,
+            broker_report_summaries=broker_summaries,
+        )
         reply_report_md.write_text(llm_professional_markdown, encoding="utf-8")
         reply_report_html.write_text(
             render_markdown_html(llm_professional_markdown, title=f"{args.topic} LLM Professional Report"),
