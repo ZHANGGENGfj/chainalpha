@@ -15,10 +15,11 @@ from chainalpha.investment.daily_market_scan_enhanced import (
 )
 from chainalpha.investment.llm_reply import (
     generate_event_signal_markdown,
-    generate_evidence_based_professional_topic_markdown,
+    generate_chunked_professional_topic_report,
     generate_topic_reply,
     render_topic_reply,
 )
+from chainalpha.investment.evidence_pack import build_professional_evidence_pack
 from chainalpha.investment.report_extractors import load_local_report_summaries
 from chainalpha.investment.topic_report import (
     build_topic_research_report,
@@ -312,6 +313,8 @@ def parse_key_value_output(output: str) -> dict[str, str]:
 def child_env() -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = "." if not existing else f".{os.pathsep}{existing}"
     env.pop("SSLKEYLOGFILE", None)
     return env
 
@@ -359,6 +362,7 @@ def _write_llm_outputs(args: argparse.Namespace, out_dir: Path, report_data: dic
     reply_html = out_dir / "llm_topic_reply.html"
     reply_report_md = out_dir / "llm_professional_report.md"
     reply_report_html = out_dir / "llm_professional_report.html"
+    reply_report_chunks = out_dir / "llm_professional_chunks.json"
     event_signal_md = out_dir / "llm_event_signal_analysis.md"
     event_signal_html = out_dir / "llm_event_signal_analysis.html"
     reply_markdown = render_topic_reply(reply)
@@ -375,12 +379,15 @@ def _write_llm_outputs(args: argparse.Namespace, out_dir: Path, report_data: dic
     except Exception as exc:
         print(f"LLM event signal analysis failed: {type(exc).__name__}: {exc}")
     try:
-        llm_professional_markdown = generate_evidence_based_professional_topic_markdown(
+        professional_payload = build_professional_evidence_pack(
             report_data,
             local_financial_summaries=financial_summaries,
             broker_report_summaries=broker_summaries,
         )
+        chunked_result = generate_chunked_professional_topic_report(professional_payload)
+        llm_professional_markdown = chunked_result["markdown"]
         reply_report_md.write_text(llm_professional_markdown, encoding="utf-8")
+        reply_report_chunks.write_text(json.dumps(chunked_result["chunk_notes"], ensure_ascii=False, indent=2), encoding="utf-8")
         reply_report_html.write_text(
             render_markdown_html(llm_professional_markdown, title=f"{args.topic} LLM Professional Report"),
             encoding="utf-8",
@@ -394,6 +401,8 @@ def _write_llm_outputs(args: argparse.Namespace, out_dir: Path, report_data: dic
         print(f"LLM Professional Report: {reply_report_md}")
     if reply_report_html.exists():
         print(f"LLM Professional HTML: {reply_report_html}")
+    if reply_report_chunks.exists():
+        print(f"LLM Professional Chunks: {reply_report_chunks}")
     if event_signal_md.exists():
         print(f"LLM Event Signal Analysis: {event_signal_md}")
     if event_signal_html.exists():

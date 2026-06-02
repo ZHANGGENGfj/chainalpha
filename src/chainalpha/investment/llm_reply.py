@@ -706,6 +706,7 @@ def generate_evidence_based_professional_topic_markdown(
     *,
     local_financial_summaries: list[dict[str, Any]] | None = None,
     broker_report_summaries: list[dict[str, Any]] | None = None,
+    chunked: bool = True,
 ) -> str:
     """Generate a professional report from a compact evidence pack.
 
@@ -720,6 +721,8 @@ def generate_evidence_based_professional_topic_markdown(
         local_financial_summaries=local_financial_summaries,
         broker_report_summaries=broker_report_summaries,
     )
+    if chunked:
+        return generate_chunked_professional_topic_report(payload, client=client)["markdown"]
     system = """你是严谨的中文卖方投研分析师。你必须只使用输入 JSON 里的证据写报告。
 禁止输出 <think>、思考过程、JSON 或代码。禁止编造事实、客户、订单金额、估值倍数、预测数值、市场份额、关键时间点。
 如果字段标记为 low confidence，只能写成“待核验线索”，不能当成确定事实。
@@ -756,6 +759,141 @@ def generate_evidence_based_professional_topic_markdown(
 
 输入 JSON：
 {json.dumps(payload, ensure_ascii=False, indent=2)}
+"""
+    return client.chat_text(system, user, timeout=180)
+
+
+def generate_chunked_professional_topic_report(
+    payload: dict[str, Any],
+    *,
+    client: LLMClient | None = None,
+) -> dict[str, Any]:
+    settings = load_settings()
+    client = client or LLMClient(settings)
+    chunk_notes: list[dict[str, str]] = []
+    for idx, chunk in enumerate(_professional_payload_chunks(payload), 1):
+        chunk_notes.append(
+            {
+                "chunk": chunk["chunk_name"],
+                "markdown": _summarize_professional_chunk(client, chunk, idx=idx),
+            }
+        )
+    markdown = _compose_professional_report_from_chunk_notes(client, payload, chunk_notes)
+    return {"markdown": markdown, "chunk_notes": chunk_notes}
+
+
+def _professional_payload_chunks(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    base = {
+        "topic": payload.get("topic"),
+        "generated_at": payload.get("generated_at"),
+        "target_company": payload.get("target_company"),
+        "business_model": payload.get("business_model"),
+        "peer_or_chain_companies": payload.get("peer_or_chain_companies"),
+        "financial_snapshot": payload.get("financial_snapshot"),
+        "price_snapshot": payload.get("price_snapshot"),
+        "valuation_view": payload.get("valuation_view"),
+        "sentiment": payload.get("sentiment"),
+        "scenarios": payload.get("scenarios"),
+        "tracking_indicators": payload.get("tracking_indicators"),
+        "data_quality_warnings": payload.get("data_quality_warnings"),
+        "writing_guardrails": payload.get("writing_guardrails"),
+        "mandatory_data_gaps": payload.get("mandatory_data_gaps"),
+    }
+    chunks: list[dict[str, Any]] = [{"chunk_name": "base_profile_and_guardrails", "payload": base}]
+    chunks.extend(_split_list_payload("news_evidence", payload.get("news_evidence") or [], max_items=4))
+    chunks.extend(_split_list_payload("signals", payload.get("signals") or [], max_items=5))
+    chunks.extend(_split_list_payload("financial_report_summaries", payload.get("financial_report_summaries") or [], max_items=1))
+    chunks.extend(_split_list_payload("broker_report_summaries", payload.get("broker_report_summaries") or [], max_items=2))
+    return chunks
+
+
+def _split_list_payload(name: str, values: list[Any], *, max_items: int) -> list[dict[str, Any]]:
+    chunks: list[dict[str, Any]] = []
+    for start in range(0, len(values), max_items):
+        part = values[start:start + max_items]
+        if part:
+            chunks.append({"chunk_name": f"{name}_{start // max_items + 1}", "payload": {name: _trim_deep(part)}})
+    return chunks
+
+
+def _trim_deep(value: Any, *, max_string: int = 900) -> Any:
+    if isinstance(value, str):
+        return value[:max_string]
+    if isinstance(value, list):
+        return [_trim_deep(item, max_string=max_string) for item in value]
+    if isinstance(value, dict):
+        return {key: _trim_deep(item, max_string=max_string) for key, item in value.items()}
+    return value
+
+
+def _summarize_professional_chunk(client: LLMClient, chunk: dict[str, Any], *, idx: int) -> str:
+    system = """你是投研资料整理员。只基于输入 JSON 生成压缩证据摘要。
+禁止输出 <think>、思考过程、JSON 或代码。禁止编造客户、数字、时间点、估值和预测。
+如果输入证据不足，写“数据缺口/待核验”。"""
+    user = f"""
+请把第 {idx} 批投研资料压缩成 Markdown 证据摘要。
+
+要求：
+1. 只保留对最终投研报告有用的信息。
+2. 分成：事实、低可信线索、投研含义、风险、数据缺口、可引用证据。
+3. 不要写完整报告，不要使用 12 章模板。
+4. 不要出现程序字段名。
+
+输入 JSON：
+{json.dumps(chunk, ensure_ascii=False, indent=2)}
+"""
+    return client.chat_text(system, user, timeout=120)
+
+
+def _compose_professional_report_from_chunk_notes(
+    client: LLMClient,
+    payload: dict[str, Any],
+    chunk_notes: list[dict[str, str]],
+) -> str:
+    compact_payload = {
+        "topic": payload.get("topic"),
+        "target_company": payload.get("target_company"),
+        "business_model": payload.get("business_model"),
+        "financial_snapshot": payload.get("financial_snapshot"),
+        "price_snapshot": payload.get("price_snapshot"),
+        "valuation_view": payload.get("valuation_view"),
+        "sentiment": payload.get("sentiment"),
+        "scenarios": payload.get("scenarios"),
+        "tracking_indicators": payload.get("tracking_indicators"),
+        "data_quality_warnings": payload.get("data_quality_warnings"),
+        "writing_guardrails": payload.get("writing_guardrails"),
+        "mandatory_data_gaps": payload.get("mandatory_data_gaps"),
+        "chunk_notes": chunk_notes,
+    }
+    system = """你是严谨的中文卖方投研分析师。根据分批证据摘要合成最终报告。
+禁止输出 <think>、思考过程、JSON 或代码。禁止编造事实、客户、订单金额、估值倍数、预测数值、市场份额、关键时间点。
+没有证据时，不能写具体客户名、具体百分比阈值、具体年份/季度节点。
+禁止在报告正文出现程序字段名。"""
+    user = f"""
+请基于输入的分批证据摘要，合成一份专业中文 Markdown 投资研究报告。
+
+必须严格使用以下 12 个一级章节，标题、编号、顺序不能改变：
+## 1. 核心结论
+## 2. 公司概况与商业模式
+## 3. 近期事件与市场表现
+## 4. 财务深度分析
+## 5. 行业与产业链分析
+## 6. 竞争格局
+## 7. 估值分析
+## 8. 盈利预测
+## 9. 预期差与催化剂
+## 10. 风险与证伪条件
+## 11. 跟踪指标仪表盘
+## 12. 附录
+
+写作要求：
+1. 使用分批摘要中的事实和待核验线索，不要回到原始长文本。
+2. 每个章节都要有内容；缺少硬数据时，写验证框架和需要补充的数据。
+3. 光模块产业链优先使用 corrected_chain_logic，不能把 GPU 集群写成直接上游，不能把激光器/光器件机械写成下游客户。
+4. 附录用自然语言说明数据来源和质量，不要出现程序字段名。
+
+输入 JSON：
+{json.dumps(compact_payload, ensure_ascii=False, indent=2)}
 """
     return client.chat_text(system, user, timeout=180)
 

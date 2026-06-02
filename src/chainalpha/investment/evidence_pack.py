@@ -71,8 +71,8 @@ def build_professional_evidence_pack(
         },
         "financial_snapshot": _snapshot_pack(financial),
         "price_snapshot": _snapshot_pack(price),
-        "financial_report_summaries": financial_summaries[:max_a_share_reports + 8],
-        "broker_report_summaries": broker_summaries[:8],
+        "financial_report_summaries": _trim_deep(financial_summaries[:max_a_share_reports + 8]),
+        "broker_report_summaries": _trim_deep(broker_summaries[:8]),
         "valuation_view": report.get("valuation_view") or [],
         "news_evidence": [_doc_pack(doc) for doc in docs],
         "signals": [_signal_pack(sig) for sig in (report.get("signals") or [])[:max_signals]],
@@ -98,6 +98,16 @@ def _snapshot_pack(snapshot: Any) -> dict[str, Any] | None:
         "usable_as": "待核验线索" if confidence == "low" else "结构化数据",
         "data": data,
     }
+
+
+def _trim_deep(value: Any, *, max_string: int = 900, max_list: int = 12) -> Any:
+    if isinstance(value, str):
+        return value[:max_string]
+    if isinstance(value, list):
+        return [_trim_deep(item, max_string=max_string, max_list=max_list) for item in value[:max_list]]
+    if isinstance(value, dict):
+        return {key: _trim_deep(item, max_string=max_string, max_list=max_list) for key, item in value.items()}
+    return value
 
 
 def _snapshot_confidence(snapshot: Any) -> str:
