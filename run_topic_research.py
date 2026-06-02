@@ -215,8 +215,8 @@ def resolve_media_crawler_app_root(data_root: Path) -> Path:
 
 
 def refresh_mediacrawler_news(args: argparse.Namespace, out_dir: Path, data_root: Path) -> dict | None:
-    app_root = resolve_media_crawler_app_root(data_root)
-    script = app_root / "main.py"
+    app_root = resolve_media_crawler_app_root(data_root).resolve()
+    script = (app_root / "main.py").resolve()
     if not script.exists():
         message = f"MediaCrawler main script not found: {script}"
         if args.require_refresh_news:
