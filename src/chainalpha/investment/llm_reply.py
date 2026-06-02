@@ -93,6 +93,7 @@ def render_investment_reply(reply: dict[str, Any]) -> str:
 def generate_topic_reply(report: dict[str, Any]) -> dict[str, Any]:
     settings = load_settings()
     client = LLMClient(settings)
+    payload = _topic_reply_payload(report)
     user = f"""
 请基于以下专题研究 JSON，生成最终中文投研回复。只允许使用输入中的信息，不要编造外部事实。
 
@@ -122,9 +123,34 @@ def generate_topic_reply(report: dict[str, Any]) -> dict[str, Any]:
 }}
 
 输入 JSON：
-{json.dumps(report, ensure_ascii=False, indent=2)}
+{json.dumps(payload, ensure_ascii=False, indent=2)}
 """
     return client.chat_json(SYSTEM_PROMPT, user, timeout=90)
+
+
+def _topic_reply_payload(report: dict[str, Any], max_docs: int = 8, max_signals: int = 8) -> dict[str, Any]:
+    companies = report.get("companies") or []
+    primary = companies[0] if companies else {}
+    return {
+        "topic": report.get("topic"),
+        "generated_at": report.get("generated_at"),
+        "intent": report.get("intent"),
+        "target_company": primary.get("company") or {},
+        "business_summary": primary.get("business_summary"),
+        "key_products": primary.get("key_products") or [],
+        "upstream_nodes": primary.get("upstream_nodes") or [],
+        "downstream_nodes": primary.get("downstream_nodes") or [],
+        "financial": _trim_for_prompt(primary.get("financial")),
+        "price": _trim_for_prompt(primary.get("price")),
+        "valuation_view": _trim_for_prompt(report.get("valuation_view") or []),
+        "recent_documents": [_doc_dict_brief(item, max_content=360) for item in (report.get("recent_documents") or [])[:max_docs]],
+        "selected_documents": [_doc_dict_brief(item, max_content=360) for item in (report.get("selected_documents") or [])[:max_docs]],
+        "signals": [_signal_dict_brief(item) for item in (report.get("signals") or [])[:max_signals]],
+        "sentiment": {"score": report.get("sentiment_score"), "label": report.get("sentiment_label")},
+        "scenarios": _trim_for_prompt(report.get("scenarios") or []),
+        "tracking_indicators": _trim_for_prompt(report.get("tracking_indicators") or []),
+        "warnings": _trim_for_prompt(report.get("warnings") or []),
+    }
 
 
 def generate_event_signal_markdown(report: dict[str, Any]) -> str:
@@ -285,7 +311,7 @@ def _signal_dict_brief(signal: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _doc_dict_brief(doc: dict[str, Any]) -> dict[str, Any]:
+def _doc_dict_brief(doc: dict[str, Any], max_content: int = 800) -> dict[str, Any]:
     return {
         "title": doc.get("title"),
         "source": doc.get("source"),
@@ -293,8 +319,18 @@ def _doc_dict_brief(doc: dict[str, Any]) -> dict[str, Any]:
         "url": doc.get("url"),
         "path": doc.get("path"),
         "published_at": doc.get("published_at"),
-        "content": str(doc.get("content") or "")[:800],
+        "content": str(doc.get("content") or "")[:max_content],
     }
+
+
+def _trim_for_prompt(value: Any, *, max_string: int = 500, max_list: int = 8) -> Any:
+    if isinstance(value, str):
+        return value[:max_string]
+    if isinstance(value, list):
+        return [_trim_for_prompt(item, max_string=max_string, max_list=max_list) for item in value[:max_list]]
+    if isinstance(value, dict):
+        return {key: _trim_for_prompt(item, max_string=max_string, max_list=max_list) for key, item in value.items()}
+    return value
 
 
 def generate_professional_topic_markdown(report: dict[str, Any]) -> str:

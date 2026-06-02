@@ -351,12 +351,6 @@ def _write_llm_outputs(args: argparse.Namespace, out_dir: Path, report_data: dic
             flush=True,
         )
 
-    try:
-        reply = generate_topic_reply(report_data)
-    except Exception as exc:
-        print(f"LLM summary failed: {type(exc).__name__}: {exc}")
-        return
-
     reply_json = out_dir / "llm_topic_reply.json"
     reply_md = out_dir / "llm_topic_reply.md"
     reply_html = out_dir / "llm_topic_reply.html"
@@ -365,10 +359,14 @@ def _write_llm_outputs(args: argparse.Namespace, out_dir: Path, report_data: dic
     reply_report_chunks = out_dir / "llm_professional_chunks.json"
     event_signal_md = out_dir / "llm_event_signal_analysis.md"
     event_signal_html = out_dir / "llm_event_signal_analysis.html"
-    reply_markdown = render_topic_reply(reply)
-    reply_json.write_text(json.dumps(reply, ensure_ascii=False, indent=2), encoding="utf-8")
-    reply_md.write_text(reply_markdown, encoding="utf-8")
-    reply_html.write_text(render_markdown_html(reply_markdown, title=f"{args.topic} LLM Reply"), encoding="utf-8")
+    try:
+        reply = generate_topic_reply(report_data)
+        reply_markdown = render_topic_reply(reply)
+        reply_json.write_text(json.dumps(reply, ensure_ascii=False, indent=2), encoding="utf-8")
+        reply_md.write_text(reply_markdown, encoding="utf-8")
+        reply_html.write_text(render_markdown_html(reply_markdown, title=f"{args.topic} LLM Reply"), encoding="utf-8")
+    except Exception as exc:
+        print(f"LLM summary failed, continue professional report: {type(exc).__name__}: {exc}")
     try:
         event_signal_markdown = generate_event_signal_markdown(report_data)
         event_signal_md.write_text(event_signal_markdown, encoding="utf-8")
@@ -394,9 +392,12 @@ def _write_llm_outputs(args: argparse.Namespace, out_dir: Path, report_data: dic
         )
     except Exception as exc:
         print(f"LLM professional report failed: {type(exc).__name__}: {exc}")
-    print(f"LLM JSON: {reply_json}")
-    print(f"LLM Markdown: {reply_md}")
-    print(f"LLM HTML: {reply_html}")
+    if reply_json.exists():
+        print(f"LLM JSON: {reply_json}")
+    if reply_md.exists():
+        print(f"LLM Markdown: {reply_md}")
+    if reply_html.exists():
+        print(f"LLM HTML: {reply_html}")
     if reply_report_md.exists():
         print(f"LLM Professional Report: {reply_report_md}")
     if reply_report_html.exists():
