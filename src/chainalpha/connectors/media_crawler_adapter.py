@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any, Iterable
 
 from chainalpha.connectors.base import BaseConnector, FetchRequest, SourceDocument, apply_limit, build_source_document, in_date_range, parse_datetime, resolve_path, text_matches
@@ -74,8 +76,16 @@ class MediaCrawlerConnector(BaseConnector):
             metadata=request.metadata,
         )
         docs: list[SourceDocument] = []
+        seen_keys: set[str] = set()
         for platform, file_path in self._iter_files():
-            docs.extend(self._read_file(platform, file_path, local_request))
+            for doc in self._read_file(platform, file_path, local_request):
+                key = _dedup_document_key(doc)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                docs.append(doc)
+                if request.limit is not None and len(docs) >= request.limit:
+                    break
             if request.limit is not None and len(docs) >= request.limit:
                 break
         return apply_limit(docs, request.limit)
@@ -179,3 +189,51 @@ def _platform_source_type(platform: str) -> str:
     if platform == "broker_reports":
         return "broker_research_report"
     return "mainstream_media"
+
+
+def _dedup_document_key(doc: SourceDocument) -> str:
+    """Stable cross-file dedup key for large reports and repeated crawler runs."""
+    metadata = doc.metadata or {}
+    record = metadata.get("record") if isinstance(metadata.get("record"), dict) else {}
+    platform = str(metadata.get("platform") or "")
+
+    for value in [
+        doc.url,
+        record.get("url"),
+        record.get("閾炬帴"),
+        record.get("pdf_path"),
+        record.get("id"),
+    ]:
+        clean = _clean_key_part(value)
+        if clean:
+            return f"{platform}:url:{clean}"
+
+    title = _normalize_title(doc.title)
+    company = _clean_key_part(record.get("company") or record.get("鍏徃"))
+    ticker = _clean_key_part(record.get("ticker") or record.get("浠ｇ爜"))
+    published = _clean_key_part(
+        record.get("published_at")
+        or record.get("鍙戝竷鏃ユ湡")
+        or record.get("鍏憡鏃ユ湡")
+        or (doc.published_at.isoformat()[:10] if doc.published_at else "")
+    )
+    source = _clean_key_part(doc.source)
+    semantic_key = "|".join(part for part in [platform, source, company, ticker, title, published] if part)
+    if semantic_key:
+        return f"{platform}:semantic:{semantic_key}"
+
+    content_digest = hashlib.sha256(normalize_text(doc.content[:2000]).encode("utf-8")).hexdigest()[:16]
+    return f"{platform}:content:{content_digest}"
+
+
+def _clean_key_part(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    return re.sub(r"\s+", " ", str(value)).strip().lower()
+
+
+def _normalize_title(value: Any) -> str:
+    text = _clean_key_part(value)
+    text = re.sub(r"[【】\[\]（）()《》\"'“”‘’：:，,。.!！?？、|_\-\s]+", "", text)
+    text = re.sub(r"(摘要|英文版|公告|报告)$", "", text)
+    return text

@@ -23,6 +23,7 @@ from chainalpha.investment.market_data import (
     load_price_snapshots,
     lookup_snapshot,
 )
+from chainalpha.investment.news_enrichment import enrich_valuable_news_documents
 from chainalpha.investment.topic_valuation import build_target_valuation_view
 from chainalpha.memory.index import HybridIndex
 from chainalpha.ontology.industry_graph import IndustryGraph
@@ -147,6 +148,7 @@ class TopicResearchReport:
     matched_nodes: list[str] = field(default_factory=list)
     upstream_nodes: list[str] = field(default_factory=list)
     downstream_nodes: list[str] = field(default_factory=list)
+    recent_news: list[SourceDocument] = field(default_factory=list)
     recent_documents: list[SourceDocument] = field(default_factory=list)
     selected_documents: list[SourceDocument] = field(default_factory=list)
     signals: list[WeakSignal] = field(default_factory=list)
@@ -171,6 +173,7 @@ class TopicResearchReport:
             "matched_nodes": self.matched_nodes,
             "upstream_nodes": self.upstream_nodes,
             "downstream_nodes": self.downstream_nodes,
+            "recent_news": [doc.to_dict() for doc in self.recent_news],
             "recent_documents": [doc.to_dict() for doc in self.recent_documents],
             "selected_documents": [doc.to_dict() for doc in self.selected_documents],
             "signals": [signal.to_dict() for signal in self.signals],
@@ -221,6 +224,12 @@ def build_topic_research_report(
     warnings = [*manager.errors]
     for result in results:
         warnings.extend(f"{result.source_name}: {err}" for err in result.errors)
+
+    valuable_news, news_warnings = enrich_valuable_news_documents(topic, docs)
+    warnings.extend(news_warnings)
+    if valuable_news:
+        enriched_ids = {doc.id for doc in valuable_news}
+        docs = [*valuable_news, *[doc for doc in docs if doc.id not in enriched_ids]]
 
     sorted_docs = _sort_documents(docs)
     chunks = source_documents_to_chunks(sorted_docs)
@@ -314,6 +323,7 @@ def build_topic_research_report(
         matched_nodes=related_nodes,
         upstream_nodes=upstream_nodes,
         downstream_nodes=downstream_nodes,
+        recent_news=valuable_news,
         recent_documents=sorted_docs[:top_k_docs],
         selected_documents=selected_docs[:top_k_docs],
         signals=signals[:top_k_chunks],
@@ -1809,6 +1819,20 @@ def _hot_news_items(report: TopicResearchReport, top_k: int = 12) -> list[str]:
         suffix_parts = [part for part in [source, path] if part]
         suffix = f" | {' | '.join(suffix_parts)}" if suffix_parts else ""
         items.append((sort_key, f"[{label}] {clean_title}{suffix}"))
+
+    for doc in getattr(report, "recent_news", [])[:top_k]:
+        date_text = _doc_date_text(doc)
+        value = (doc.metadata or {}).get("news_value") or {}
+        category = value.get("category") or "news"
+        reason = value.get("reason") or ""
+        summary = (doc.metadata or {}).get("article_summary") or doc.content
+        summary = " ".join(str(summary or "").split())[:260]
+        title = f"{date_text} {doc.title}"
+        if summary:
+            title = f"{title} | 摘要: {summary}"
+        if reason:
+            title = f"{title} | 入选原因: {reason}"
+        add(date_text, f"最近新闻/{category}", title, doc.source, doc.url or doc.path or "")
 
     docs = [*report.selected_documents, *report.recent_documents]
     docs = _sort_documents(list({doc.id: doc for doc in docs}.values()))

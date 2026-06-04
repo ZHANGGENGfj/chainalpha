@@ -64,6 +64,12 @@ def parse_args() -> argparse.Namespace:
         help="Python executable used to run MediaCrawler scripts.",
     )
     parser.add_argument(
+        "--media-crawler-timeout",
+        type=int,
+        default=90,
+        help="Seconds to wait for each MediaCrawler platform before continuing to the next one.",
+    )
+    parser.add_argument(
         "--crawl-sources",
         default="",
         help="Reserved for targeted collector. MediaCrawler main.py finance_news currently uses its built-in source list.",
@@ -226,7 +232,7 @@ def refresh_mediacrawler_news(args: argparse.Namespace, out_dir: Path, data_root
         return {"ok": False, "error": message}
 
     keywords = build_crawl_keywords(args.topic)
-    platforms = ["finance_news", "cninfo_reports", "broker_reports"]
+    platforms = ["cninfo_reports", "broker_reports", "finance_news"]
     # main.py / finance_news currently uses the source list inside
     # media_platform.finance_news.client.FinanceNewsClient. --crawl-sources is
     # kept for the older targeted collector and future source filtering.
@@ -251,17 +257,27 @@ def refresh_mediacrawler_news(args: argparse.Namespace, out_dir: Path, data_root
             "true",
         ]
         print(f"[media-crawler] running main.py {platform} for: {', '.join(keywords)}", flush=True)
-        result = subprocess.run(
-            command,
-            cwd=app_root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=child_env(),
-        )
-        output = result.stdout + "\n" + result.stderr
-        ok = result.returncode == 0
+        try:
+            result = subprocess.run(
+                command,
+                cwd=app_root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=child_env(),
+                timeout=args.media_crawler_timeout,
+            )
+            output = result.stdout + "\n" + result.stderr
+            returncode = result.returncode
+            ok = returncode == 0
+        except subprocess.TimeoutExpired as exc:
+            output = ((exc.stdout or "") if isinstance(exc.stdout, str) else "") + "\n" + (
+                (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+            )
+            returncode = -1
+            ok = False
+            output = f"MediaCrawler platform timed out after {args.media_crawler_timeout}s.\n{output}"
         all_ok = all_ok and ok
         if not ok:
             print(f"[media-crawler] {platform} refresh failed, continue with local data: {output.strip()[:800]}", flush=True)
@@ -271,7 +287,7 @@ def refresh_mediacrawler_news(args: argparse.Namespace, out_dir: Path, data_root
             {
                 "platform": platform,
                 "ok": ok,
-                "returncode": result.returncode,
+                "returncode": returncode,
                 "keywords": keywords,
                 "command": command,
                 "data_dir": str(data_root / platform),

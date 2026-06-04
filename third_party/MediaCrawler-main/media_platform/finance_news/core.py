@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import config
 from playwright.async_api import BrowserContext, BrowserType, async_playwright
 
 from .client import FinanceNewsClient
@@ -371,7 +372,7 @@ class FinanceNewsCrawler(AbstractCrawler):
             return
 
         client = FinanceNewsClient(self.browser_context)
-        raw_news = await client.fetch_all_news(limit_per_source=80)
+        raw_news = await client.fetch_all_news(limit_per_source=80, keywords=self.keyword_list)
         print(f"[FinanceNews] fetched {len(raw_news)} raw news items before dedup")
 
         raw_news, dedup_stats = self.dedup_index.filter_new(raw_news)
@@ -394,7 +395,7 @@ class FinanceNewsCrawler(AbstractCrawler):
     async def start(self):
         async with async_playwright() as playwright:
             user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-            await self.launch_browser(playwright.chromium, None, user_agent, headless=False)
+            await self.launch_browser(playwright.chromium, None, user_agent, headless=config.HEADLESS)
             try:
                 await self.search()
             finally:
@@ -402,9 +403,9 @@ class FinanceNewsCrawler(AbstractCrawler):
                     await self.browser_instance.close()
 
     async def save_raw_data(self, data: list[dict[str, Any]]):
-        save_dir = "data/finance_news/raw"
-        os.makedirs(save_dir, exist_ok=True)
         day = datetime.now().strftime("%Y%m%d")
+        save_dir = os.path.join("data/finance_news/raw", day)
+        os.makedirs(save_dir, exist_ok=True)
         file_path = os.path.join(save_dir, f"finance_news_raw_{day}.json")
         existing = load_json_list(file_path)
         merged = merge_daily_news_items(existing, data)
@@ -416,9 +417,9 @@ class FinanceNewsCrawler(AbstractCrawler):
         )
 
     async def save_processed_data(self, data: list[dict[str, Any]]):
-        save_dir = "data/finance_news/processed"
-        os.makedirs(save_dir, exist_ok=True)
         day = datetime.now().strftime("%Y%m%d")
+        save_dir = os.path.join("data/finance_news/processed", day)
+        os.makedirs(save_dir, exist_ok=True)
         json_path = os.path.join(save_dir, f"finance_news_processed_{day}.json")
         jsonl_path = os.path.join(save_dir, f"finance_news_processed_{day}.jsonl")
         existing = load_json_list(json_path)

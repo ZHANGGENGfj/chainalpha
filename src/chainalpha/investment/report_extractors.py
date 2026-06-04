@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import re
 from typing import Any
@@ -230,7 +231,31 @@ def _iter_report_files(root: str | Path | None, *, max_files: int) -> list[Path]
         if item.is_file() and item.suffix.lower() in {".pdf", ".txt", ".md", ".json", ".jsonl", ".csv"}
     ]
     files.sort(key=lambda item: item.stat().st_mtime, reverse=True)
-    return files[:max_files]
+    return _dedup_report_files(files)[:max_files]
+
+
+def _dedup_report_files(files: list[Path]) -> list[Path]:
+    kept: list[Path] = []
+    seen: set[str] = set()
+    for path in files:
+        key = _report_file_key(path)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        kept.append(path)
+    return kept
+
+
+def _report_file_key(path: Path) -> str:
+    try:
+        stat = path.stat()
+        with path.open("rb") as file:
+            head = file.read(128 * 1024)
+        digest = hashlib.sha256(head).hexdigest()[:20]
+        return f"content:{stat.st_size}:{digest}"
+    except Exception:
+        name = re.sub(r"[\s_\-（）()【】\[\]]+", "", path.stem.lower())
+        return f"name:{name}:{path.suffix.lower()}"
 
 
 def _matches_terms(text: str, terms: list[str]) -> bool:

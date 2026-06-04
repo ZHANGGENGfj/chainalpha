@@ -81,26 +81,34 @@ class BrokerReportsCrawler(AbstractCrawler):
         }
 
     async def save_raw_data(self, data: list[dict[str, Any]]):
-        save_dir = "data/broker_reports/raw"
-        os.makedirs(save_dir, exist_ok=True)
         day = datetime.now().strftime("%Y%m%d")
+        save_dir = f"data/broker_reports/raw/{day}"
+        os.makedirs(save_dir, exist_ok=True)
         file_path = os.path.join(save_dir, f"broker_reports_raw_{day}.json")
-        merged = _merge_daily_items(_load_json_list(file_path), data)
+        existing = _load_json_list(file_path)
+        merged = _merge_daily_items(existing, data)
         Path(file_path).write_text(json.dumps(merged, ensure_ascii=False, indent=4), encoding="utf-8")
-        utils.logger.info(f">>> [BrokerReports] raw daily file saved to {file_path}; total={len(merged)}")
+        utils.logger.info(
+            f">>> [BrokerReports] raw daily file saved to {file_path}; "
+            f"old={len(existing)}, new={len(data)}, total={len(merged)}"
+        )
 
     async def save_processed_data(self, data: list[dict[str, Any]]):
-        save_dir = "data/broker_reports/processed"
-        os.makedirs(save_dir, exist_ok=True)
         day = datetime.now().strftime("%Y%m%d")
+        save_dir = f"data/broker_reports/processed/{day}"
+        os.makedirs(save_dir, exist_ok=True)
         json_path = os.path.join(save_dir, f"broker_reports_processed_{day}.json")
         jsonl_path = os.path.join(save_dir, f"broker_reports_processed_{day}.jsonl")
-        merged = _merge_daily_items(_load_json_list(json_path), data)
+        existing = _load_json_list(json_path)
+        merged = _merge_daily_items(existing, data)
         Path(json_path).write_text(json.dumps(merged, ensure_ascii=False, indent=4), encoding="utf-8")
         with open(jsonl_path, "w", encoding="utf-8") as file:
             for item in merged:
                 file.write(json.dumps(item, ensure_ascii=False) + "\n")
-        utils.logger.info(f">>> [BrokerReports] processed daily file saved to {json_path}; total={len(merged)}")
+        utils.logger.info(
+            f">>> [BrokerReports] processed daily file saved to {json_path}; "
+            f"old={len(existing)}, new={len(data)}, total={len(merged)}"
+        )
 
 
 def _load_json_list(path: str) -> list[dict[str, Any]]:
