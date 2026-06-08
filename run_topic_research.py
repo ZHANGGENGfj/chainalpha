@@ -20,6 +20,7 @@ from chainalpha.investment.llm_reply import (
     render_topic_reply,
 )
 from chainalpha.investment.evidence_pack import build_professional_evidence_pack
+from chainalpha.investment.query_expansion import QueryExpansion, expand_user_query
 from chainalpha.investment.report_extractors import load_local_report_summaries
 from chainalpha.investment.topic_report import (
     build_topic_research_report,
@@ -91,6 +92,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k-companies", type=int, default=1, help="Maximum related companies to analyze. Defaults to target-company focus.")
     parser.add_argument("--top-k-candidates", type=int, default=8, help="Maximum candidates to output.")
     parser.add_argument("--include-a-share-reports", action="store_true", help="Fetch and parse A-share filings/PDF reports. Disabled by default.")
+    parser.add_argument("--no-query-expansion", action="store_true", help="Disable LLM/rule query correction and expansion.")
     parser.add_argument("--llm-summary", action="store_true", help="Generate final LLM summary.")
     return parser.parse_args()
 
@@ -157,8 +159,18 @@ def _run_daily_scan(args: argparse.Namespace, out_dir: Path) -> None:
 
 def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
     media_data_root = resolve_media_crawler_data_root(args.media_crawler_root)
+    query_expansion = expand_user_query(
+        args.topic,
+        company_map=str(args.company_map),
+        enable_llm=not args.no_query_expansion,
+    )
+    query_expansion_path = out_dir / "query_expansion.json"
+    query_expansion_path.write_text(json.dumps(query_expansion.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Query expansion: {query_expansion.corrected_query} | {', '.join(query_expansion.search_keywords[:12])}", flush=True)
+    print(f"Query expansion JSON: {query_expansion_path}", flush=True)
+
     if not args.skip_refresh_news:
-        refresh_result = refresh_mediacrawler_news(args, out_dir, media_data_root)
+        refresh_result = refresh_mediacrawler_news(args, out_dir, media_data_root, query_expansion)
         if refresh_result:
             metadata_path = out_dir / "media_crawler_refresh.json"
             metadata_path.write_text(json.dumps(refresh_result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -178,6 +190,8 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
         focus_target_company=True,
         media_crawler_root=media_data_root,
         media_crawler_platforms=[item.strip() for item in args.media_crawler_platforms.split(",") if item.strip()],
+        search_keywords=query_expansion.search_keywords,
+        query_expansion=query_expansion.to_dict(),
     )
 
     report_json = out_dir / "topic_research.json"
@@ -221,7 +235,12 @@ def resolve_media_crawler_app_root(data_root: Path) -> Path:
     return data_root.parent if data_root.name == "data" else data_root
 
 
-def refresh_mediacrawler_news(args: argparse.Namespace, out_dir: Path, data_root: Path) -> dict | None:
+def refresh_mediacrawler_news(
+    args: argparse.Namespace,
+    out_dir: Path,
+    data_root: Path,
+    query_expansion: QueryExpansion | None = None,
+) -> dict | None:
     app_root = resolve_media_crawler_app_root(data_root).resolve()
     script = (app_root / "main.py").resolve()
     if not script.exists():
@@ -231,7 +250,9 @@ def refresh_mediacrawler_news(args: argparse.Namespace, out_dir: Path, data_root
         print(f"[media-crawler] skip refresh: {message}", flush=True)
         return {"ok": False, "error": message}
 
-    keywords = build_crawl_keywords(args.topic)
+    keywords = query_expansion.crawl_keywords if query_expansion else build_crawl_keywords(args.topic)
+    if not keywords:
+        keywords = build_crawl_keywords(args.topic)
     platforms = ["cninfo_reports", "broker_reports", "finance_news"]
     # main.py / finance_news currently uses the source list inside
     # media_platform.finance_news.client.FinanceNewsClient. --crawl-sources is

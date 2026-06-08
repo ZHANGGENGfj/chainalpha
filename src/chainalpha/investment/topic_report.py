@@ -144,6 +144,7 @@ class TopicResearchReport:
     topic: str
     generated_at: str
     intent: ResearchIntent
+    query_expansion: dict[str, Any] = field(default_factory=dict)
     planned_tasks: list[TaskPlanItem] = field(default_factory=list)
     matched_nodes: list[str] = field(default_factory=list)
     upstream_nodes: list[str] = field(default_factory=list)
@@ -169,6 +170,7 @@ class TopicResearchReport:
             "topic": self.topic,
             "generated_at": self.generated_at,
             "intent": self.intent.to_dict(),
+            "query_expansion": self.query_expansion,
             "planned_tasks": [item.to_dict() for item in self.planned_tasks],
             "matched_nodes": self.matched_nodes,
             "upstream_nodes": self.upstream_nodes,
@@ -207,6 +209,8 @@ def build_topic_research_report(
     focus_target_company: bool = False,
     media_crawler_root: str | Path | None = None,
     media_crawler_platforms: list[str] | None = None,
+    search_keywords: list[str] | None = None,
+    query_expansion: dict[str, Any] | None = None,
 ) -> TopicResearchReport:
     profiles = resolve_query_profiles(topic, load_company_profiles(company_map))
     intent = _classify_intent(topic, profiles)
@@ -220,7 +224,9 @@ def build_topic_research_report(
         media_crawler_root=media_crawler_root,
         media_crawler_platforms=media_crawler_platforms,
     )
-    docs, results = manager.fetch_all(FetchRequest(query=topic, limit=limit))
+    expanded_terms = [term for term in (search_keywords or []) if term]
+    expanded_query = " ".join([topic, *expanded_terms[:16]]).strip()
+    docs, results = manager.fetch_all(FetchRequest(query=topic, keywords=expanded_terms, limit=limit))
     warnings = [*manager.errors]
     for result in results:
         warnings.extend(f"{result.source_name}: {err}" for err in result.errors)
@@ -233,8 +239,8 @@ def build_topic_research_report(
 
     sorted_docs = _sort_documents(docs)
     chunks = source_documents_to_chunks(sorted_docs)
-    selected_docs = _select_documents(topic, chunks, sorted_docs, top_k_docs)
-    signals, _, _ = analyze_chunks(chunks, query=topic, top_k_chunks=top_k_chunks, out_dir=None, store=None)
+    selected_docs = _select_documents(expanded_query or topic, chunks, sorted_docs, top_k_docs)
+    signals, _, _ = analyze_chunks(chunks, query=expanded_query or topic, top_k_chunks=top_k_chunks, out_dir=None, store=None)
 
     graph = IndustryGraph.load_ai_graph()
     matched_nodes = canonicalize_nodes(
@@ -338,6 +344,7 @@ def build_topic_research_report(
         scenarios=scenarios,
         tracking_indicators=tracking_indicators,
         warnings=warnings,
+        query_expansion=query_expansion or {},
     )
 
 

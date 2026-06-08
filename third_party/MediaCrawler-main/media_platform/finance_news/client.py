@@ -62,6 +62,21 @@ class FinanceNewsClient:
             ],
             "selectors": ["a[href*='nbd.com.cn']", ".news_item a", ".list a"],
         },
+        {
+            "name": "今日头条",
+            "url": "https://www.toutiao.com/",
+            "search_urls": [
+                "https://so.toutiao.com/search?dvpf=pc&source=input&keyword={keyword}&enable_druid_v2=1",
+            ],
+            "selectors": [
+                "a[href*='toutiao.com']",
+                "a[href*='toutiao.com/article']",
+                "a[href*='toutiao.com/w']",
+                ".result-content a",
+                ".search-result a",
+                "h3 a",
+            ],
+        },
     ]
 
     def __init__(self, browser_context: BrowserContext):
@@ -168,6 +183,11 @@ class FinanceNewsClient:
                     if len(items) >= limit:
                         break
                     text = self._clean(await link.inner_text())
+                    if not text:
+                        try:
+                            text = self._clean(await link.evaluate("el => el.closest('div,li,article')?.innerText || ''"))
+                        except Exception:
+                            text = ""
                     href = await link.get_attribute("href")
                     link_url = self._absolute_url(page_url, href)
                     if not self._is_valid_title(text) or not link_url:
@@ -275,4 +295,3 @@ class FinanceNewsClient:
         if not text:
             return ""
         return re.sub(r"\s+", " ", str(text)).strip()
-
