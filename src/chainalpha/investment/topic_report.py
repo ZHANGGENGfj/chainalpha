@@ -25,6 +25,7 @@ from chainalpha.investment.market_data import (
 )
 from chainalpha.investment.news_enrichment import enrich_valuable_news_documents
 from chainalpha.investment.topic_valuation import build_target_valuation_view
+from chainalpha.investment.web_financial_facts import extract_web_financial_facts
 from chainalpha.memory.index import HybridIndex
 from chainalpha.ontology.industry_graph import IndustryGraph
 from chainalpha.pipeline import analyze_chunks
@@ -156,6 +157,7 @@ class TopicResearchReport:
     companies: list[TopicCompanyView] = field(default_factory=list)
     candidates: list[InvestmentCandidate] = field(default_factory=list)
     current_snapshot: list[str] = field(default_factory=list)
+    web_financial_facts: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     core_logic: list[str] = field(default_factory=list)
     valuation_view: list[str] = field(default_factory=list)
     sentiment_score: float = 0.0
@@ -182,6 +184,7 @@ class TopicResearchReport:
             "companies": [row.to_dict() for row in self.companies],
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "current_snapshot": self.current_snapshot,
+            "web_financial_facts": self.web_financial_facts,
             "core_logic": self.core_logic,
             "valuation_view": self.valuation_view,
             "sentiment_score": self.sentiment_score,
@@ -211,6 +214,7 @@ def build_topic_research_report(
     media_crawler_platforms: list[str] | None = None,
     search_keywords: list[str] | None = None,
     query_expansion: dict[str, Any] | None = None,
+    enable_financial_web: bool = True,
 ) -> TopicResearchReport:
     profiles = resolve_query_profiles(topic, load_company_profiles(company_map))
     intent = _classify_intent(topic, profiles)
@@ -223,6 +227,7 @@ def build_topic_research_report(
         topic,
         media_crawler_root=media_crawler_root,
         media_crawler_platforms=media_crawler_platforms,
+        enable_financial_web=enable_financial_web,
     )
     expanded_terms = [term for term in (search_keywords or []) if term]
     expanded_query = " ".join([topic, *expanded_terms[:16]]).strip()
@@ -299,6 +304,14 @@ def build_topic_research_report(
         for row in company_views
     ]
 
+    primary_company_name = company_views[0].company.name if company_views else ""
+    primary_ticker = company_views[0].company.ticker if company_views else ""
+    web_financial_facts = extract_web_financial_facts(
+        [doc.to_dict() for doc in sorted_docs],
+        company_name=primary_company_name,
+        ticker=primary_ticker,
+    )
+
     candidates = build_investment_candidates(
         signals,
         [row.company for row in company_views],
@@ -336,6 +349,7 @@ def build_topic_research_report(
         companies=company_views,
         candidates=candidates,
         current_snapshot=current_snapshot,
+        web_financial_facts=web_financial_facts,
         core_logic=core_logic,
         valuation_view=valuation_view,
         sentiment_score=sentiment_score,
@@ -417,6 +431,23 @@ def render_topic_research_markdown(report: TopicResearchReport) -> str:
     for item in report.valuation_view:
         lines.append(f"- {item}")
     lines.append("")
+
+    lines.extend(["## Web Financial Facts", ""])
+    has_web_facts = False
+    for category, facts in report.web_financial_facts.items():
+        if not facts:
+            continue
+        has_web_facts = True
+        lines.append(f"### {category}")
+        for fact in facts[:4]:
+            lines.append(
+                f"- [{fact.get('confidence')}] {fact.get('title') or '-'} | "
+                f"{fact.get('source') or '-'} | {fact.get('excerpt') or '-'}"
+            )
+        lines.append("")
+    if not has_web_facts:
+        lines.append("- No web financial facts extracted.")
+        lines.append("")
 
     lines.extend(["## Scenarios", ""])
     for scenario in report.scenarios:
@@ -1259,6 +1290,7 @@ def _classify_intent(topic: str, profiles: list[CompanyProfile]) -> ResearchInte
     query = topic.strip()
     low = query.lower()
     exact_company = next((profile for profile in profiles if _matches_company_name(query, profile)), None)
+    mentioned_company = next((profile for profile in profiles if _mentions_company(query, profile)), None)
     compare_markers = ["和", "vs", "对比", "比较", "哪个好"]
     question_markers = ["能不能", "是否", "怎么看", "为什么", "还有没有", "值不值得"]
     sector_markers = ["产业链", "板块", "行业", "设备", "经济"]
@@ -1267,6 +1299,12 @@ def _classify_intent(topic: str, profiles: list[CompanyProfile]) -> ResearchInte
         return ResearchIntent("comparison", query, "输入中包含对比关系词，优先按多对象横向比较处理。")
     if exact_company:
         return ResearchIntent("company", exact_company.name, "输入与公司名或别名精确匹配，按公司深度研究处理。")
+    if mentioned_company:
+        return ResearchIntent(
+            "company",
+            mentioned_company.name,
+            f"输入中明确提到公司“{mentioned_company.name}”，锁定为目标公司；其他公司只能作为上下游、同行或证据材料。",
+        )
     if any(marker in query for marker in sector_markers):
         return ResearchIntent("sector", query, "输入更像行业、板块或产业链主题，按板块研究处理。")
     if any(marker in query for marker in question_markers):
@@ -1281,15 +1319,21 @@ def _build_dynamic_source_manager(
     topic: str,
     media_crawler_root: str | Path | None = None,
     media_crawler_platforms: list[str] | None = None,
+    enable_financial_web: bool = True,
 ) -> SourceManager:
     configs = load_connector_configs(config)
+    if not enable_financial_web:
+        configs = [
+            ConnectorConfig(cfg.name, cfg.type, False, cfg.params) if cfg.type == "financial_web" else cfg
+            for cfg in configs
+        ]
     if media_crawler_root:
         _enable_or_add_media_crawler(configs, media_crawler_root, media_crawler_platforms)
     auto_profiles = _auto_profiles_for_topic(profiles, intent, topic)
     for cfg in configs:
         if cfg.type == "tencent_quotes":
             _fill_symbols(cfg.params, auto_profiles, mode="tencent")
-        elif cfg.type in {"mootdx_quotes", "mootdx_financials", "akshare_news"}:
+        elif cfg.type in {"mootdx_quotes", "mootdx_financials", "akshare_news", "financial_web"}:
             _fill_symbols(cfg.params, auto_profiles, mode="plain")
     return SourceManager.from_configs(configs)
 
@@ -1808,6 +1852,18 @@ def _matches_company_name(query: str, profile: CompanyProfile) -> bool:
         return False
     terms = [profile.name, *(profile.aliases or []), profile.ticker or ""]
     return any(term and term.lower() == q for term in terms)
+
+
+def _mentions_company(query: str, profile: CompanyProfile) -> bool:
+    q = query.strip().lower()
+    if not q:
+        return False
+    terms = [profile.name, *(profile.aliases or []), profile.ticker or ""]
+    if profile.ticker:
+        terms.append(profile.ticker.split(".")[0])
+    terms = [str(term).strip().lower() for term in terms if str(term).strip()]
+    terms.sort(key=len, reverse=True)
+    return any(len(term) >= 2 and term in q for term in terms)
 
 
 def _hot_news_items(report: TopicResearchReport, top_k: int = 12) -> list[str]:

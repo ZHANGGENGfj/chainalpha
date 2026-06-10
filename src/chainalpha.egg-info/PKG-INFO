@@ -17,6 +17,8 @@ Requires-Dist: uvicorn>=0.27.0
 Requires-Dist: python-dotenv>=1.0.0
 Provides-Extra: playwright
 Requires-Dist: playwright>=1.44.0; extra == "playwright"
+Provides-Extra: agents
+Requires-Dist: langgraph>=0.2.0; extra == "agents"
 Provides-Extra: china-data
 Requires-Dist: akshare>=1.16.80; extra == "china-data"
 Requires-Dist: mootdx>=0.11.7; extra == "china-data"

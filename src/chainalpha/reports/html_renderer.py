@@ -4,9 +4,16 @@ from html import escape
 import re
 
 
-def render_markdown_html(markdown: str, *, title: str = "ChainAlpha Report") -> str:
+def render_markdown_html(
+    markdown: str,
+    *,
+    title: str = "ChainAlpha Report",
+    brand_name: str | None = None,
+    brand_logo: str | None = None,
+) -> str:
     body = _markdown_to_html(markdown)
     page_title = escape(title)
+    brand_html = _brand_header_html(brand_name=brand_name, brand_logo=brand_logo)
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -41,6 +48,34 @@ def render_markdown_html(markdown: str, *, title: str = "ChainAlpha Report") -> 
       border: 1px solid var(--line);
       border-radius: 8px;
       box-shadow: 0 18px 45px rgba(15, 23, 42, 0.08);
+    }}
+    .brand-header {{
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin: -12px 0 28px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--line);
+    }}
+    .brand-logo {{
+      width: 42px;
+      height: 42px;
+      object-fit: contain;
+      border-radius: 4px;
+      background: #fff;
+      border: 1px solid var(--line);
+      padding: 3px;
+    }}
+    .brand-name {{
+      font-size: 18px;
+      font-weight: 700;
+      color: #102a43;
+      letter-spacing: 0;
+    }}
+    .brand-subtitle {{
+      margin-top: 2px;
+      font-size: 12px;
+      color: var(--muted);
     }}
     h1, h2, h3 {{
       line-height: 1.3;
@@ -109,11 +144,35 @@ def render_markdown_html(markdown: str, *, title: str = "ChainAlpha Report") -> 
 </head>
 <body>
   <main>
+{brand_html}
 {body}
   </main>
 </body>
 </html>
 """
+
+
+def _brand_header_html(*, brand_name: str | None, brand_logo: str | None) -> str:
+    name = (brand_name or "").strip()
+    logo = (brand_logo or "").strip()
+    if not name and not logo:
+        return ""
+
+    logo_html = ""
+    if logo:
+        logo_html = f'    <img class="brand-logo" src="{escape(logo, quote=True)}" alt="{escape(name or "logo", quote=True)}">'
+    name_html = escape(name or "Investment Research")
+    return "\n".join(
+        [
+            '    <section class="brand-header">',
+            logo_html,
+            "      <div>",
+            f'        <div class="brand-name">{name_html}</div>',
+            '        <div class="brand-subtitle">Investment Research Report</div>',
+            "      </div>",
+            "    </section>",
+        ]
+    )
 
 
 def _markdown_to_html(markdown: str) -> str:

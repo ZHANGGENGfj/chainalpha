@@ -30,16 +30,16 @@ class LLMClient:
         return session.post(url, headers=headers, json=payload, timeout=timeout)
 
     def chat_json(self, system: str, user: str, timeout: int = 60) -> dict[str, Any]:
-        if not self.settings.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured.")
+        if not self.settings.llm_api_key:
+            raise RuntimeError(f"{self.settings.llm_provider.upper()} API key is not configured.")
 
-        url = f"{self.settings.openai_base_url}/chat/completions"
+        url = f"{self.settings.llm_base_url}/chat/completions"
         headers = {
-            "Authorization": f"Bearer {self.settings.openai_api_key}",
+            "Authorization": f"Bearer {self.settings.llm_api_key}",
             "Content-Type": "application/json",
         }
         payload = {
-            "model": self.settings.openai_model,
+            "model": self.settings.llm_model,
             "temperature": 0.1,
             "messages": [
                 {"role": "system", "content": system},
@@ -61,16 +61,16 @@ class LLMClient:
             raise
 
     def chat_text(self, system: str, user: str, timeout: int = 60) -> str:
-        if not self.settings.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured.")
+        if not self.settings.llm_api_key:
+            raise RuntimeError(f"{self.settings.llm_provider.upper()} API key is not configured.")
 
-        url = f"{self.settings.openai_base_url}/chat/completions"
+        url = f"{self.settings.llm_base_url}/chat/completions"
         headers = {
-            "Authorization": f"Bearer {self.settings.openai_api_key}",
+            "Authorization": f"Bearer {self.settings.llm_api_key}",
             "Content-Type": "application/json",
         }
         payload = {
-            "model": self.settings.openai_model,
+            "model": self.settings.llm_model,
             "temperature": 0.2,
             "messages": [
                 {"role": "system", "content": system},

@@ -7,7 +7,7 @@ from chainalpha.schemas import CompanyProfile
 
 def resolve_query_profiles(query: str, seed_profiles: list[CompanyProfile] | None = None, top_k: int = 8) -> list[CompanyProfile]:
     seed_profiles = seed_profiles or []
-    resolved = list(seed_profiles)
+    resolved = [profile for profile in seed_profiles if _profile_visible_in_query(query, profile)]
     seen = {_profile_key(profile) for profile in resolved}
 
     for profile in _resolve_with_akshare(query, top_k=top_k):
@@ -21,6 +21,16 @@ def resolve_query_profiles(query: str, seed_profiles: list[CompanyProfile] | Non
         if fallback is not None:
             resolved.append(fallback)
     return resolved
+
+
+def _profile_visible_in_query(query: str, profile: CompanyProfile) -> bool:
+    q = str(query or "").strip().lower()
+    if not q:
+        return False
+    terms = [profile.name, profile.ticker or "", (profile.ticker or "").split(".")[0], *(profile.aliases or [])]
+    normalized = [str(term).strip().lower() for term in terms if str(term).strip()]
+    normalized.sort(key=len, reverse=True)
+    return any(len(term) >= 2 and term in q for term in normalized)
 
 
 def _resolve_with_akshare(query: str, top_k: int) -> list[CompanyProfile]:

@@ -25,6 +25,7 @@ from chainalpha.connectors.search_page import PredefinedNewsConnector, SearchPag
 from chainalpha.connectors.sec_edgar import SecEdgarConnector
 from chainalpha.connectors.social import RedditConnector, XRecentSearchConnector
 from chainalpha.connectors.media_crawler_adapter import MediaCrawlerConnector
+from chainalpha.connectors.financial_web import FinancialWebConnector
 from chainalpha.connectors.obsidian import ObsidianConnector
 from chainalpha.connectors.rss import RSSConnector
 from chainalpha.connectors.sitemap import SitemapConnector
@@ -54,6 +55,7 @@ class ConnectorRegistry:
         reg.register("local_files", LocalFilesConnector)
         reg.register("obsidian", ObsidianConnector)
         reg.register("media_crawler", MediaCrawlerConnector)
+        reg.register("financial_web", FinancialWebConnector)
         reg.register("rss", RSSConnector)
         reg.register("sitemap", SitemapConnector)
         reg.register("playwright", PlaywrightConnector)
