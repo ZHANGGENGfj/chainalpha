@@ -11,11 +11,34 @@ from chainalpha.investment.company_map import load_company_profiles
 from chainalpha.nlp.llm_client import LLMClient
 
 
+MATERIAL_CHAIN_TEMPLATES: dict[str, dict[str, list[str]]] = {
+    "电子布": {
+        "aliases": ["电子级玻璃纤维布", "电子玻纤布", "E-glass fabric"],
+        "upstream": ["电子级玻璃纤维纱", "玻璃纤维", "石英砂", "叶腊石", "浸润剂", "铂铑合金漏板"],
+        "midstream": ["电子布", "开纤", "织造", "表面处理", "薄布", "超薄布", "极薄布"],
+        "downstream": ["覆铜板", "CCL", "PCB", "高频高速覆铜板", "服务器PCB", "AI服务器", "汽车电子"],
+        "companies": [
+            "电子布 上市公司",
+            "电子布 相关公司",
+            "玻纤电子布 公司",
+            "覆铜板 电子布 公司",
+            "中国巨石",
+            "宏和科技",
+            "中材科技",
+            "生益科技",
+            "南亚新材",
+            "金安国纪",
+        ],
+    }
+}
+
+
 @dataclass
 class QueryExpansion:
     original_query: str
     corrected_query: str
     intent: str = "unknown"
+    topic_class: str = "unknown"
     keywords: list[str] = field(default_factory=list)
     company_names: list[str] = field(default_factory=list)
     tickers: list[str] = field(default_factory=list)
@@ -34,6 +57,7 @@ class QueryExpansion:
             "original_query": self.original_query,
             "corrected_query": self.corrected_query,
             "intent": self.intent,
+            "topic_class": self.topic_class,
             "keywords": self.keywords,
             "company_names": self.company_names,
             "tickers": self.tickers,
@@ -54,21 +78,23 @@ class QueryExpansion:
         tickers = self.tickers[:2] if self.intent == "company" else self.tickers
         aliases = self.aliases[:4] if self.intent == "company" else self.aliases
         subject = _primary_query_subject(self)
+        scoped_keywords = _scope_terms(subject, _crawl_keyword_dimensions(self))
         scoped_products = _scope_terms(subject, self.product_terms[:6])
         scoped_focus = _scope_terms(subject, self.research_focus_terms[:8])
         scoped_events = _scope_terms(subject, self.event_terms[:8])
         terms = [
             subject,
-            self.corrected_query if self.corrected_query != subject else "",
-            *self.keywords[:4],
             *company_names,
             *tickers,
             *aliases,
+            *scoped_keywords,
             *scoped_products,
             *scoped_focus,
             *scoped_events,
         ]
-        return _unique_terms(terms, limit=18)
+        if self.topic_class == "raw_material_chain":
+            terms = [subject, *_material_chain_crawl_terms(subject, self), *terms]
+        return _unique_terms(terms, limit=24)
 
     @property
     def search_keywords(self) -> list[str]:
@@ -85,6 +111,8 @@ class QueryExpansion:
             *_scope_terms(subject, self.research_focus_terms),
             *_scope_terms(subject, self.event_terms),
         ]
+        if self.topic_class == "raw_material_chain":
+            terms = [subject, *_material_chain_crawl_terms(subject, self), *terms]
         return _unique_terms(terms, limit=48)
 
 
@@ -124,6 +152,8 @@ def _llm_expand_query(query: str, base: QueryExpansion, settings) -> dict[str, A
             "如果 rule_guess.company_names 为空，说明规则没有识别出明确上市公司；此时不要猜股票代码，不要把历史上下文里的公司塞进 company_names/tickers。",
             "关键词必须围绕 user_query 的原始主体，不要加入与原问题无关的固定样例词，例如光模块、800G、中际旭创等，除非用户问题明确包含这些词。",
             "用于抓取的关键词应是企业/话题主体或“主体 + 维度”的短语，例如“东财科技 财报”“东财科技 研报”“东财科技 风险”，不要输出单独的“财报”“订单”“风险”这类裸词作为核心关键词。",
+            "如果 user_query 是某种材料、原料、零部件或工艺，例如电子布、铜箔、玻纤、光刻胶、覆铜板，请将 topic_class 设为 raw_material_chain，并扩展上游原料、中游制造、下游应用、相关上市公司、价格供需、产能瓶颈、替代难度。",
+            "材料产业链主题要优先搜索“主体 上游原料”“主体 下游应用”“主体 产业链”“主体 价格”“主体 供需”“主体 上市公司”“主体 相关公司”，不要只搜索“主体 财报”。",
             "如果是上市公司，尽量保留公司简称、全称、股票代码、常见别名。",
             "如果是行业/板块，扩展上下游、产品、技术路线、事件催化词。",
             "如果用户关注产业链、上下游、瓶颈权力、卡位、核心零部件，请把检索改写为寻找：客户路径、供应链位置、产能约束、替代难度、财务结构、机构滞后六类证据。",
@@ -133,6 +163,7 @@ def _llm_expand_query(query: str, base: QueryExpansion, settings) -> dict[str, A
         "json_schema": {
             "corrected_query": "str",
             "intent": "company|sector|theme|claim|market|unknown",
+            "topic_class": "company|raw_material_chain|component_chain|industry_chain|concept|unknown",
             "keywords": ["str"],
             "company_names": ["str"],
             "tickers": ["str"],
@@ -190,6 +221,7 @@ def _rule_expand_query(query: str, *, company_map: str) -> QueryExpansion:
         original_query=query,
         corrected_query=clean_query,
         intent="company" if profiles else _guess_intent(clean_query),
+        topic_class=_classify_topic_class(clean_query),
         keywords=_basic_terms(clean_query),
         method="rules",
     )
@@ -204,6 +236,7 @@ def _rule_expand_query(query: str, *, company_map: str) -> QueryExpansion:
         expansion.keywords.extend(profile.watch_tags or [])
 
     expansion.event_terms.extend(_default_event_terms(clean_query))
+    _apply_topic_class_expansion(expansion)
     expansion.research_focus_terms.extend(_bottleneck_research_terms(clean_query, expansion))
     _dedup_expansion(expansion)
     return expansion
@@ -267,6 +300,7 @@ def _merge_expansion(base: QueryExpansion, result: dict[str, Any]) -> QueryExpan
         original_query=base.original_query,
         corrected_query=str(result.get("corrected_query") or base.corrected_query).strip() or base.corrected_query,
         intent=str(result.get("intent") or base.intent),
+        topic_class=str(result.get("topic_class") or base.topic_class),
         keywords=[*base.keywords, *_list_field(result, "keywords")],
         company_names=[*base.company_names, *result_company_names],
         tickers=[*base.tickers, *result_tickers],
@@ -280,6 +314,8 @@ def _merge_expansion(base: QueryExpansion, result: dict[str, Any]) -> QueryExpan
         method="llm",
         warnings=base.warnings,
     )
+    _dedup_expansion(merged)
+    _apply_topic_class_expansion(merged)
     _dedup_expansion(merged)
     return merged
 
@@ -330,6 +366,7 @@ def _basic_terms(query: str) -> list[str]:
 
 def _strip_question_suffix(query: str) -> str:
     text = _clean_query(query)
+    text = re.split(r"(是什么东西|是什么|怎么样|如何|怎么看|有前景吗|有没有前景|有前景|前景如何|值得投资吗|能买吗|好不好)", text, maxsplit=1)[0].strip(" ，,。？?！!")
     patterns = [
         r"(怎么样|如何|怎么看|能买吗|值得买吗|值得投资吗|有没有机会|好不好|行不行)[？?。!！]*$",
         r"(是什么|是谁|吗|呢)[？?。!！]*$",
@@ -340,14 +377,53 @@ def _strip_question_suffix(query: str) -> str:
 
 
 def _primary_query_subject(expansion: QueryExpansion) -> str:
-    for value in [*expansion.company_names[:1], *expansion.aliases[:1], *expansion.keywords[1:2]]:
-        clean = _clean_query(value)
+    for value in [*expansion.company_names[:1], *expansion.aliases[:1]]:
+        clean = _strip_question_suffix(value) or _clean_query(value)
+        if _is_generic_query_word(clean):
+            continue
         if clean:
             return clean
-    stripped = _strip_question_suffix(expansion.corrected_query)
+    stripped = _strip_question_suffix(expansion.corrected_query) or _strip_question_suffix(expansion.original_query)
     if stripped:
         return stripped
+    for value in [*expansion.keywords[1:2], expansion.corrected_query]:
+        clean = _strip_question_suffix(value) or _clean_query(value)
+        if _is_generic_query_word(clean):
+            continue
+        if clean:
+            return clean
     return _clean_query(expansion.corrected_query or expansion.original_query)
+
+
+def _crawl_keyword_dimensions(expansion: QueryExpansion) -> list[str]:
+    terms: list[str] = []
+    for term in expansion.keywords:
+        clean = _strip_question_suffix(term) or _clean_query(term)
+        if not clean or _is_generic_query_word(clean):
+            continue
+        terms.append(clean)
+    if any(word in expansion.original_query for word in ["是什么", "是什么东西", "怎么样", "如何"]):
+        terms.extend(["是什么", "行业", "市场", "产业链", "上市公司"])
+    if any(word in expansion.original_query for word in ["前景", "机会", "空间"]):
+        terms.extend(["前景", "市场空间", "景气度", "供需", "价格"])
+    if any(word in expansion.original_query for word in ["投资", "能买吗", "值得"]):
+        terms.extend(["研报", "估值", "风险", "盈利预测"])
+    return _unique_terms(terms, limit=10)
+
+
+def _is_generic_query_word(value: str) -> bool:
+    return _clean_query(value) in {
+        "怎么样",
+        "如何",
+        "怎么看",
+        "有前景吗",
+        "有前景",
+        "前景",
+        "是什么",
+        "是什么东西",
+        "吗",
+        "呢",
+    }
 
 
 def _scope_terms(subject: str, terms: list[str]) -> list[str]:
@@ -369,6 +445,8 @@ def _scope_terms(subject: str, terms: list[str]) -> list[str]:
 def _guess_intent(query: str) -> str:
     if re.search(r"\b[036]\d{5}(?:\.(?:SZ|SH))?\b", query.upper()):
         return "company"
+    if _classify_topic_class(query) in {"raw_material_chain", "component_chain", "industry_chain"}:
+        return "theme"
     if _looks_like_bottleneck_research(query):
         return "theme"
     if any(word in query for word in ["板块", "行业", "产业链", "主题"]):
@@ -376,6 +454,99 @@ def _guess_intent(query: str) -> str:
     if any(word in query for word in ["上涨", "下跌", "业绩", "真实吗", "是否"]):
         return "claim"
     return "unknown"
+
+
+def _classify_topic_class(query: str) -> str:
+    subject = _strip_question_suffix(query) or _clean_query(query)
+    if _material_template_key(subject):
+        return "raw_material_chain"
+    if any(word in query for word in ["原材料", "材料", "原料", "化工品", "金属", "玻纤", "电子布", "铜箔", "光刻胶"]):
+        return "raw_material_chain"
+    if any(word in query for word in ["零部件", "组件", "器件", "模组", "设备", "工艺"]):
+        return "component_chain"
+    if any(word in query for word in ["产业链", "上下游", "行业链条"]):
+        return "industry_chain"
+    return "unknown"
+
+
+def _apply_topic_class_expansion(expansion: QueryExpansion) -> None:
+    if expansion.topic_class != "raw_material_chain":
+        return
+    subject = _primary_query_subject(expansion)
+    key = _material_template_key(subject)
+    template = MATERIAL_CHAIN_TEMPLATES.get(key or "", {})
+    aliases = template.get("aliases") or []
+    upstream = template.get("upstream") or []
+    midstream = template.get("midstream") or []
+    downstream = template.get("downstream") or []
+    companies = template.get("companies") or []
+
+    expansion.keywords.extend(
+        [
+            f"{subject} 是什么",
+            f"{subject} 产业链",
+            f"{subject} 上游原料",
+            f"{subject} 下游应用",
+            f"{subject} 价格",
+            f"{subject} 供需",
+            f"{subject} 市场空间",
+            f"{subject} 上市公司",
+            *aliases,
+            *companies,
+        ]
+    )
+    expansion.industry_terms.extend(["原材料", "电子材料", "产业链", "覆铜板", "PCB"])
+    expansion.product_terms.extend([*aliases, *upstream, *midstream, *downstream])
+    expansion.research_focus_terms.extend(
+        [
+            "上游原料",
+            "中游制造",
+            "下游应用",
+            "相关上市公司",
+            "供需格局",
+            "价格周期",
+            "产能扩张",
+            "进口替代",
+            "技术壁垒",
+            "单位价值量",
+            "毛利率",
+            "库存",
+        ]
+    )
+
+
+def _material_chain_crawl_terms(subject: str, expansion: QueryExpansion) -> list[str]:
+    key = _material_template_key(subject)
+    template = MATERIAL_CHAIN_TEMPLATES.get(key or "", {})
+    terms = [
+        f"{subject} 是什么",
+        f"{subject} 产业链",
+        f"{subject} 上游原料",
+        f"{subject} 下游应用",
+        f"{subject} 相关公司",
+        f"{subject} 上市公司",
+        f"{subject} 价格",
+        f"{subject} 供需",
+        f"{subject} 市场空间",
+        f"{subject} 产能",
+        f"{subject} 研报",
+        f"{subject} 风险",
+    ]
+    for group in ["upstream", "midstream", "downstream", "companies"]:
+        for item in (template.get(group) or [])[:5]:
+            if _clean_query(item) == _clean_query(subject):
+                continue
+            terms.append(f"{subject} {item}")
+    return _unique_terms(terms, limit=28)
+
+
+def _material_template_key(subject: str) -> str | None:
+    clean = _clean_query(subject)
+    for key, data in MATERIAL_CHAIN_TEMPLATES.items():
+        aliases = data.get("aliases") or []
+        if key in clean or any(alias and alias in clean for alias in aliases):
+            return key
+    return None
 
 
 def _default_event_terms(query: str) -> list[str]:

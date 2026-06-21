@@ -64,11 +64,13 @@ def build_five_agent_research_report(
 
 
 def render_five_agent_markdown(report: FiveAgentResearchReport) -> str:
-    target = report.target_company.get("name") or "目标公司"
+    entity_type = report.target_company.get("entity_type") or "company"
+    target = report.target_company.get("name") or report.topic or "研究主题"
+    target_label = "产业链主题" if entity_type == "industry-chain" else "目标公司"
     lines = [
         f"# {report.topic} 五Agent研投流水线报告",
         "",
-        f"> 目标公司：{target}",
+        f"> {target_label}：{target}",
         f"> Agent框架：{report.framework}",
         "",
         "## 总体结论",
@@ -441,6 +443,12 @@ def _final_conclusion(agents: list[AgentSection], target_company: dict[str, Any]
 
 
 def _target_company(topic_report: dict[str, Any], chain_report: dict[str, Any]) -> dict[str, Any]:
+    query_expansion = topic_report.get("query_expansion") or {}
+    if query_expansion.get("topic_class") in {"raw_material_chain", "component_chain", "industry_chain"}:
+        return {
+            "name": topic_report.get("topic") or query_expansion.get("corrected_query") or "产业链主题",
+            "entity_type": "industry-chain",
+        }
     if chain_report.get("target_company"):
         return chain_report["target_company"]
     companies = topic_report.get("companies") or []

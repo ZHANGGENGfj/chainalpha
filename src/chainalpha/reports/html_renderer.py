@@ -128,6 +128,25 @@ def render_markdown_html(
     pre code {{ background: transparent; color: inherit; padding: 0; }}
     a {{ color: var(--accent); text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
+    figure.report-figure {{
+      margin: 18px 0 28px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }}
+    figure.report-figure img {{
+      display: block;
+      width: 100%;
+      height: auto;
+      border-radius: 4px;
+    }}
+    figure.report-figure figcaption {{
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }}
     hr {{ border: 0; border-top: 1px solid var(--line); margin: 28px 0; }}
     @media (max-width: 720px) {{
       main {{
@@ -238,6 +257,21 @@ def _markdown_to_html(markdown: str) -> str:
             close_lists()
             level = len(heading.group(1))
             html.append(f"    <h{level}>{_inline_markup(heading.group(2).strip())}</h{level}>")
+            continue
+
+        image = re.match(r"^!\[([^\]]*)\]\(([^)]+)\)$", line.strip())
+        if image:
+            flush_paragraph()
+            flush_quote()
+            close_lists()
+            alt = escape(image.group(1).strip() or "report image", quote=True)
+            src = escape(image.group(2).strip(), quote=True)
+            caption = escape(image.group(1).strip())
+            html.append('    <figure class="report-figure">')
+            html.append(f'      <img src="{src}" alt="{alt}">')
+            if caption:
+                html.append(f"      <figcaption>{caption}</figcaption>")
+            html.append("    </figure>")
             continue
 
         if line.startswith(">"):

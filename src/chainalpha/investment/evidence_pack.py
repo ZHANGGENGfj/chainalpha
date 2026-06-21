@@ -44,9 +44,14 @@ def build_professional_evidence_pack(
     if broker_summaries:
         warnings.append("已启用机构研报摘要卡片；机构观点不等于事实，需要与公告、财报和行情交叉验证。")
 
+    query_expansion = report.get("query_expansion") or {}
+    topic_class = query_expansion.get("topic_class") or "unknown"
     return {
         "topic": report.get("topic"),
         "generated_at": report.get("generated_at"),
+        "query_expansion": query_expansion,
+        "topic_class": topic_class,
+        "research_type": "industry-chain" if topic_class in {"raw_material_chain", "component_chain", "industry_chain"} else "company",
         "target_company": {
             "name": company.get("name"),
             "ticker": company.get("ticker"),

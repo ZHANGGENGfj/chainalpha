@@ -29,6 +29,11 @@ from chainalpha.investment.agent_pipeline import (
     build_five_agent_research_report,
     render_five_agent_markdown,
 )
+from chainalpha.investment.chain_visual import (
+    build_chain_visual_data,
+    render_chain_visual_markdown,
+    save_chain_visual_outputs,
+)
 from chainalpha.investment.query_expansion import QueryExpansion, expand_user_query
 from chainalpha.investment.report_quality_agent import run_report_quality_agent
 from chainalpha.investment.report_extractors import load_local_report_summaries
@@ -104,7 +109,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k-companies", type=int, default=1, help="Maximum related companies to analyze. Defaults to target-company focus.")
     parser.add_argument("--top-k-candidates", type=int, default=8, help="Maximum candidates to output.")
     parser.add_argument("--include-a-share-reports", action="store_true", help="Fetch and parse A-share filings/PDF reports. Disabled by default.")
+    parser.add_argument(
+        "--research-type",
+        choices=["auto", "company", "industry-chain"],
+        default="auto",
+        help="Report workflow type. Use industry-chain for materials/components/themes such as 电子布; use company for single-company reports.",
+    )
     parser.add_argument("--chain-bottleneck-report", action="store_true", help="Generate industry-chain bottleneck power report.")
+    parser.add_argument("--chain-visual", action="store_true", help="Generate an upstream-to-downstream SVG chain visual for industry-chain reports.")
     parser.add_argument("--no-query-expansion", action="store_true", help="Disable LLM/rule query correction and expansion.")
     parser.add_argument("--llm-summary", action="store_true", help="Generate final LLM summary.")
     parser.add_argument(
@@ -219,9 +231,11 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
         company_map=str(args.company_map),
         enable_llm=not args.no_query_expansion,
     )
+    _apply_research_type_override(args, query_expansion)
     query_expansion_path = out_dir / "query_expansion.json"
     query_expansion_path.write_text(json.dumps(query_expansion.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Query expansion: {query_expansion.corrected_query} | {', '.join(query_expansion.search_keywords[:12])}", flush=True)
+    print(f"Research type: {_effective_research_type(args, query_expansion)} | topic_class={query_expansion.topic_class}", flush=True)
     print(f"Query expansion JSON: {query_expansion_path}", flush=True)
 
     if not args.skip_refresh_news:
@@ -293,6 +307,13 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
             print(f"Chain Bottleneck HTML: {chain_html}")
 
     agent_report = build_five_agent_research_report(report.to_dict(), chain_report_data)
+    chain_visual_markdown = ""
+    if args.chain_visual and _effective_research_type(args, query_expansion) == "industry-chain":
+        visual_data = build_chain_visual_data(report.to_dict(), agent_report.to_dict())
+        visual_paths = save_chain_visual_outputs(visual_data, out_dir)
+        chain_visual_markdown = render_chain_visual_markdown(visual_paths["svg"]) + "\n"
+        print(f"Chain Visual JSON: {visual_paths['json']}")
+        print(f"Chain Visual SVG: {visual_paths['svg']}")
     if args.output_mode == "full":
         agent_report_json = out_dir / "five_agent_report.json"
         agent_report_md = out_dir / "five_agent_report.md"
@@ -310,18 +331,30 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
 
     if args.llm_summary:
         if args.chain_bottleneck_report and chain_report_data:
-            _write_chain_bottleneck_llm_outputs(args, out_dir, chain_report_data, agent_report.to_dict())
+            _write_chain_bottleneck_llm_outputs(
+                args,
+                out_dir,
+                chain_report_data,
+                agent_report.to_dict(),
+                lead_markdown=chain_visual_markdown,
+            )
             print(
                 "Skipped generic LLM professional report because --chain-bottleneck-report is enabled. "
                 "Use llm_chain_bottleneck_report.md/html as the primary LLM output.",
                 flush=True,
             )
         else:
-            _write_llm_outputs(args, out_dir, report.to_dict())
+            _write_llm_outputs(args, out_dir, report.to_dict(), lead_markdown=chain_visual_markdown)
     elif args.output_mode == "final":
         final_md = out_dir / "final_report.md"
         final_html = out_dir / "final_report.html"
-        final_markdown = render_chain_bottleneck_markdown(chain_report) if args.chain_bottleneck_report and chain_report_data else render_professional_topic_report(report)
+        if args.chain_bottleneck_report and chain_report_data:
+            final_markdown = render_chain_bottleneck_markdown(chain_report)
+        elif _effective_research_type(args, query_expansion) == "industry-chain":
+            final_markdown = render_five_agent_markdown(agent_report)
+        else:
+            final_markdown = render_professional_topic_report(report)
+        final_markdown = _prepend_lead_markdown(chain_visual_markdown, final_markdown)
         final_markdown = _apply_report_quality_agent(args, out_dir, final_markdown, report.to_dict())
         final_md.write_text(final_markdown, encoding="utf-8")
         final_html.write_text(_render_html(args, final_markdown, title=f"{args.topic} Final Report"), encoding="utf-8")
@@ -336,6 +369,30 @@ def resolve_media_crawler_data_root(path: Path | None) -> Path:
     if p.name == "data":
         return p
     return p / "data"
+
+
+def _apply_research_type_override(args: argparse.Namespace, query_expansion: QueryExpansion) -> None:
+    if args.research_type == "auto":
+        return
+    if args.research_type == "industry-chain":
+        if query_expansion.topic_class not in {"raw_material_chain", "component_chain", "industry_chain"}:
+            query_expansion.topic_class = "industry_chain"
+        if query_expansion.intent == "company":
+            query_expansion.intent = "theme"
+        query_expansion.warnings.append("research_type=industry-chain: final report uses industry-chain pipeline template.")
+        return
+    if args.research_type == "company":
+        query_expansion.topic_class = "company"
+        query_expansion.intent = "company"
+        query_expansion.warnings.append("research_type=company: final report uses company equity-research template.")
+
+
+def _effective_research_type(args: argparse.Namespace, query_expansion: QueryExpansion) -> str:
+    if args.research_type != "auto":
+        return args.research_type
+    if query_expansion.topic_class in {"raw_material_chain", "component_chain", "industry_chain"}:
+        return "industry-chain"
+    return "company"
 
 
 def resolve_media_crawler_app_root(data_root: Path) -> Path:
@@ -449,14 +506,24 @@ def build_crawl_keywords(topic: str) -> list[str]:
 
 def build_financial_web_keywords(base_keywords: list[str], topic: str) -> list[str]:
     company = _keyword_subject(base_keywords, topic)
-    financial_terms = [
-        f"{company} 财报分析",
-        f"{company} 年报 营业收入 毛利率",
-        f"{company} 经营现金流 存货 应收账款",
-        f"{company} 研发费用 资本开支",
-    ]
+    if _looks_like_material_topic(topic, company):
+        financial_terms = [
+            f"{company} 价格",
+            f"{company} 供需",
+            f"{company} 产能",
+            f"{company} 市场空间",
+            f"{company} 产业链",
+            f"{company} 上市公司",
+        ]
+    else:
+        financial_terms = [
+            f"{company} 财报分析",
+            f"{company} 年报 营业收入 毛利率",
+            f"{company} 经营现金流 存货 应收账款",
+            f"{company} 研发费用 资本开支",
+        ]
     useful_base = [item for item in base_keywords if not _is_generic_crawl_word(item)]
-    return list(dict.fromkeys([*useful_base, *financial_terms]))[:16]
+    return list(dict.fromkeys([*useful_base[:12], *financial_terms]))[:16]
 
 
 def _keyword_subject(base_keywords: list[str], topic: str) -> str:
@@ -474,6 +541,11 @@ def _keyword_subject(base_keywords: list[str], topic: str) -> str:
 
 def _strip_question_suffix_for_keyword(value: str) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = re.split(
+        r"(是什么东西|是什么|怎么样|如何|怎么看|有前景吗|有没有前景|有前景|前景如何|值得投资吗|能买吗|好不好)",
+        text,
+        maxsplit=1,
+    )[0].strip(" ，,。？?！!")
     patterns = [
         r"(怎么样|如何|怎么看|能买吗|值得买吗|值得投资吗|有没有机会|好不好|行不行)[？?。!！]*$",
         r"(是什么|是谁|吗|呢)[？?。!！]*$",
@@ -498,6 +570,11 @@ def _is_generic_crawl_word(value: str) -> bool:
         "年报",
         "季报",
     }
+
+
+def _looks_like_material_topic(topic: str, subject: str) -> bool:
+    text = f"{topic} {subject}"
+    return any(word in text for word in ["电子布", "原材料", "材料", "原料", "玻纤", "铜箔", "光刻胶", "覆铜板"])
 
 
 def parse_key_value_output(output: str) -> dict[str, str]:
@@ -541,7 +618,23 @@ def _apply_report_quality_agent(
     return checked_markdown
 
 
-def _write_llm_outputs(args: argparse.Namespace, out_dir: Path, report_data: dict) -> None:
+def _prepend_lead_markdown(lead_markdown: str, markdown: str) -> str:
+    lead = (lead_markdown or "").strip()
+    body = (markdown or "").lstrip()
+    if not lead:
+        return markdown
+    if lead in body[:500]:
+        return markdown
+    return f"{lead}\n\n{body}"
+
+
+def _write_llm_outputs(
+    args: argparse.Namespace,
+    out_dir: Path,
+    report_data: dict,
+    *,
+    lead_markdown: str = "",
+) -> None:
     financial_summaries, broker_summaries, report_warnings = load_local_report_summaries(
         topic=args.topic,
         financial_report_dir=args.financial_report_dir,
@@ -607,10 +700,11 @@ def _write_llm_outputs(args: argparse.Namespace, out_dir: Path, report_data: dic
             broker_report_summaries=broker_summaries,
         )
         chunked_result = generate_chunked_professional_topic_report(professional_payload)
+        professional_markdown = _prepend_lead_markdown(lead_markdown, chunked_result["markdown"])
         llm_professional_markdown = _apply_report_quality_agent(
             args,
             out_dir,
-            chunked_result["markdown"],
+            professional_markdown,
             report_data,
         )
         reply_report_md.write_text(llm_professional_markdown, encoding="utf-8")
@@ -645,6 +739,8 @@ def _write_chain_bottleneck_llm_outputs(
     out_dir: Path,
     chain_report_data: dict,
     agent_report_data: dict | None = None,
+    *,
+    lead_markdown: str = "",
 ) -> None:
     llm_chain_md = out_dir / "llm_chain_bottleneck_report.md"
     llm_chain_html = out_dir / "llm_chain_bottleneck_report.html"
@@ -695,6 +791,7 @@ def _write_chain_bottleneck_llm_outputs(
             "five_agent_report": agent_report_data or {},
         }
         markdown = generate_llm_chain_bottleneck_report(chain_report, agent_report=agent_report_data)
+        markdown = _prepend_lead_markdown(lead_markdown, markdown)
         markdown = _apply_report_quality_agent(args, out_dir, markdown, report_data)
         llm_chain_md.write_text(markdown, encoding="utf-8")
         llm_chain_html.write_text(_render_html(args, markdown, title=f"{args.topic} LLM Chain Bottleneck Report"), encoding="utf-8")

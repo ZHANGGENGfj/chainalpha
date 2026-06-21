@@ -822,6 +822,9 @@ def _professional_payload_chunks(payload: dict[str, Any]) -> list[dict[str, Any]
     base = {
         "topic": payload.get("topic"),
         "generated_at": payload.get("generated_at"),
+        "research_type": payload.get("research_type"),
+        "topic_class": payload.get("topic_class"),
+        "query_expansion": payload.get("query_expansion"),
         "target_company": payload.get("target_company"),
         "business_model": payload.get("business_model"),
         "peer_or_chain_companies": payload.get("peer_or_chain_companies"),
@@ -888,6 +891,9 @@ def _compose_professional_report_from_chunk_notes(
 ) -> str:
     compact_payload = {
         "topic": payload.get("topic"),
+        "research_type": payload.get("research_type"),
+        "topic_class": payload.get("topic_class"),
+        "query_expansion": payload.get("query_expansion"),
         "target_company": payload.get("target_company"),
         "business_model": payload.get("business_model"),
         "financial_snapshot": payload.get("financial_snapshot"),
@@ -905,6 +911,9 @@ def _compose_professional_report_from_chunk_notes(
 禁止输出 <think>、思考过程、JSON 或代码。禁止编造事实、客户、订单金额、估值倍数、预测数值、市场份额、关键时间点。
 没有证据时，不能写具体客户名、具体百分比阈值、具体年份/季度节点。
 禁止在报告正文出现程序字段名。"""
+    if _is_industry_chain_payload(payload):
+        user = _industry_chain_pipeline_report_prompt(compact_payload)
+        return client.chat_text(system, user, timeout=180)
     user = f"""
 请基于输入的分批证据摘要，合成一份专业中文 Markdown 投资研究报告。
 
@@ -932,6 +941,121 @@ def _compose_professional_report_from_chunk_notes(
 {json.dumps(compact_payload, ensure_ascii=False, indent=2)}
 """
     return client.chat_text(system, user, timeout=180)
+
+
+def _is_industry_chain_payload(payload: dict[str, Any]) -> bool:
+    research_type = str(payload.get("research_type") or "").lower()
+    topic_class = str(payload.get("topic_class") or "").lower()
+    return research_type == "industry-chain" or topic_class in {"raw_material_chain", "component_chain", "industry_chain"}
+
+
+def _industry_chain_pipeline_report_prompt(compact_payload: dict[str, Any]) -> str:
+    return f"""
+请基于输入的分批证据摘要，合成一份“产业链流水线研究报告”，而不是公司研报。
+
+硬性规则：
+1. 这不是单一公司研究，不得使用“公司概况与商业模式、盈利预测、EPS预测”这类公司模板作为主结构。
+2. 必须按照“源头资源/基础原料 → 上游材料/关键辅材 → 中游制造/工艺 → 下游直接应用 → 终端需求场景”的流水线顺序组织。
+3. 只能使用输入证据。没有证据的公司、价格、产能、份额、毛利率、市场空间、客户关系必须写成“数据缺口/待验证”。
+4. 可以列出“待核验相关公司”，但必须说明它们来自新闻、搜索线索或产业链映射，不能当作已证实供应商、客户或龙头。
+5. 每个关键判断都要写清楚：证据来源、投研含义、验证路径、证伪条件。
+6. 不要输出 JSON，不要输出程序字段名。
+
+报告必须使用以下一级章节，标题和顺序不能改：
+
+# 产业链流水线研究报告：{{主题}}
+
+## 1. 核心结论与研究对象定位
+- 一句话结论
+- 研究对象属于材料、零部件、工艺、设备、应用中的哪一类
+- 当前证据强度
+- 主要机会
+- 主要风险
+
+## 2. 产业链总览：从源头到终端应用
+- 源头资源/基础原料
+- 上游材料/关键辅材
+- 中游制造/核心工艺
+- 下游直接应用
+- 终端需求场景
+- 价值量和议价权初判
+
+## 3. 源头资源与上游原料
+- 关键原料
+- 供给约束
+- 价格/供需线索
+- 代表公司或待核验公司
+- 数据缺口
+
+## 4. 中游制造、工艺壁垒与产能约束
+- 生产流程
+- 技术壁垒
+- 良率/认证周期/扩产周期
+- 产能约束
+- 替代难度
+
+## 5. 下游应用与需求传导
+- 直接下游
+- 终端应用
+- 需求驱动因素
+- 下游变化如何传导到本环节
+- 需求证伪条件
+
+## 6. 产业链公司图谱
+- 上游公司
+- 中游公司
+- 下游公司
+- 直接受益、间接受益、主题相关、需剔除
+- 每家公司与本产业链的关系证据强度
+
+## 7. 价格、供需与库存周期
+- 价格趋势线索
+- 供给变化
+- 需求变化
+- 库存周期
+- 当前周期位置
+- 数据缺口
+
+## 8. 瓶颈权力与价值分配
+- 哪个环节可能是真瓶颈
+- 客户路径
+- 供应链位置
+- 产能约束
+- 替代难度
+- 财务验证
+- 机构预期滞后
+
+## 9. 投资映射与标的分层
+- 核心资产
+- 弹性标的
+- 主题标的
+- 风险标的
+- 为什么这样分层
+
+## 10. 催化剂、预期差与跟踪指标
+- 产业催化剂
+- 公司催化剂
+- 市场已经定价什么
+- 可能超预期什么
+- 跟踪指标仪表盘
+
+## 11. 风险、反方观点与证伪条件
+- 供给过剩
+- 价格下跌
+- 替代材料/技术
+- 下游需求不及预期
+- 竞争格局恶化
+- 如何证伪投资逻辑
+
+## 12. 数据来源、证据强度与免责声明
+- 数据来源
+- 事实、推断、待验证假设
+- 数据缺口
+- 免责声明
+
+输入 JSON：
+{json.dumps(compact_payload, ensure_ascii=False, indent=2)}
+"""
 
 
 def generate_professional_topic_markdown(report: dict[str, Any]) -> str:
