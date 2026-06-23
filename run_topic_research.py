@@ -18,6 +18,11 @@ from chainalpha.investment.chain_bottleneck import (
     generate_llm_chain_bottleneck_report,
     render_chain_bottleneck_markdown,
 )
+from chainalpha.investment.chain_explainer import (
+    generate_llm_chain_explainer_report,
+    is_definition_question,
+    render_chain_explainer_markdown,
+)
 from chainalpha.investment.llm_reply import (
     generate_event_signal_markdown,
     generate_chunked_professional_topic_report,
@@ -104,6 +109,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--broker-report-dir", type=Path, default=None, help="Optional local broker/institution research report PDF/text directory or file.")
     parser.add_argument("--skip-financial-web", action="store_true", help="Disable web financial metric pages such as Eastmoney/10jqka/Sina F10.")
     parser.add_argument("--run-dir", type=Path, default=Path("./data/topic_runs"), help="Output directory.")
+    parser.add_argument("--run-id", default="", help="Optional fixed run folder name under --run-dir.")
     parser.add_argument("--limit", type=int, default=80, help="Maximum source documents to fetch.")
     parser.add_argument("--top-k-chunks", type=int, default=60, help="Top chunks to analyze.")
     parser.add_argument("--top-k-companies", type=int, default=1, help="Maximum related companies to analyze. Defaults to target-company focus.")
@@ -163,7 +169,8 @@ def main() -> None:
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
     args = parse_args()
-    out_dir = args.run_dir / datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_name = _safe_run_id(args.run_id) if args.run_id else datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = args.run_dir / out_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.daily_scan:
@@ -171,6 +178,13 @@ def main() -> None:
         return
 
     _run_topic_research(args, out_dir)
+
+
+def _safe_run_id(value: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z_.-]+", "_", value.strip())
+    if not cleaned or cleaned in {".", ".."}:
+        raise ValueError("--run-id must contain at least one safe path character.")
+    return cleaned[:80]
 
 
 def _run_daily_scan(args: argparse.Namespace, out_dir: Path) -> None:
@@ -331,13 +345,22 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
 
     if args.llm_summary:
         if args.chain_bottleneck_report and chain_report_data:
-            _write_chain_bottleneck_llm_outputs(
-                args,
-                out_dir,
-                chain_report_data,
-                agent_report.to_dict(),
-                lead_markdown=chain_visual_markdown,
-            )
+            if is_definition_question(args.topic):
+                _write_chain_explainer_llm_outputs(
+                    args,
+                    out_dir,
+                    report.to_dict(),
+                    agent_report.to_dict(),
+                    lead_markdown=chain_visual_markdown,
+                )
+            else:
+                _write_chain_bottleneck_llm_outputs(
+                    args,
+                    out_dir,
+                    chain_report_data,
+                    agent_report.to_dict(),
+                    lead_markdown=chain_visual_markdown,
+                )
             print(
                 "Skipped generic LLM professional report because --chain-bottleneck-report is enabled. "
                 "Use llm_chain_bottleneck_report.md/html as the primary LLM output.",
@@ -348,14 +371,20 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
     elif args.output_mode == "final":
         final_md = out_dir / "final_report.md"
         final_html = out_dir / "final_report.html"
-        if args.chain_bottleneck_report and chain_report_data:
+        if args.chain_bottleneck_report and chain_report_data and is_definition_question(args.topic):
+            final_markdown = render_chain_explainer_markdown(report.to_dict())
+            quality_report_data = {**report.to_dict(), "_report_kind": "chain_explainer"}
+        elif args.chain_bottleneck_report and chain_report_data:
             final_markdown = render_chain_bottleneck_markdown(chain_report)
+            quality_report_data = report.to_dict()
         elif _effective_research_type(args, query_expansion) == "industry-chain":
             final_markdown = render_five_agent_markdown(agent_report)
+            quality_report_data = report.to_dict()
         else:
             final_markdown = render_professional_topic_report(report)
+            quality_report_data = report.to_dict()
         final_markdown = _prepend_lead_markdown(chain_visual_markdown, final_markdown)
-        final_markdown = _apply_report_quality_agent(args, out_dir, final_markdown, report.to_dict())
+        final_markdown = _apply_report_quality_agent(args, out_dir, final_markdown, quality_report_data)
         final_md.write_text(final_markdown, encoding="utf-8")
         final_html.write_text(_render_html(args, final_markdown, title=f"{args.topic} Final Report"), encoding="utf-8")
         print(f"Final Markdown: {final_md}")
@@ -799,6 +828,29 @@ def _write_chain_bottleneck_llm_outputs(
         print(f"LLM Chain Bottleneck HTML: {llm_chain_html}")
     except Exception as exc:
         print(f"LLM chain bottleneck report failed: {type(exc).__name__}: {exc}")
+
+
+def _write_chain_explainer_llm_outputs(
+    args: argparse.Namespace,
+    out_dir: Path,
+    report_data: dict,
+    agent_report_data: dict | None = None,
+    *,
+    lead_markdown: str = "",
+) -> None:
+    llm_chain_md = out_dir / "llm_chain_bottleneck_report.md"
+    llm_chain_html = out_dir / "llm_chain_bottleneck_report.html"
+    try:
+        payload = {**report_data, "_report_kind": "chain_explainer"}
+        markdown = generate_llm_chain_explainer_report(payload, agent_report=agent_report_data)
+        markdown = _prepend_lead_markdown(lead_markdown, markdown)
+        markdown = _apply_report_quality_agent(args, out_dir, markdown, payload)
+        llm_chain_md.write_text(markdown, encoding="utf-8")
+        llm_chain_html.write_text(_render_html(args, markdown, title=f"{args.topic} Chain Explainer Report"), encoding="utf-8")
+        print(f"LLM Chain Explainer Report: {llm_chain_md}")
+        print(f"LLM Chain Explainer HTML: {llm_chain_html}")
+    except Exception as exc:
+        print(f"LLM chain explainer report failed: {type(exc).__name__}: {exc}")
 
 
 if __name__ == "__main__":

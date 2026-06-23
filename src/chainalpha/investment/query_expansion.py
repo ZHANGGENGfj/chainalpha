@@ -162,7 +162,7 @@ def _llm_expand_query(query: str, base: QueryExpansion, settings) -> dict[str, A
         ],
         "json_schema": {
             "corrected_query": "str",
-            "intent": "company|sector|theme|claim|market|unknown",
+            "intent": "company|sector|theme|claim|market|explain|unknown",
             "topic_class": "company|raw_material_chain|component_chain|industry_chain|concept|unknown",
             "keywords": ["str"],
             "company_names": ["str"],
@@ -283,6 +283,7 @@ def _term_visible_in_query(term: str, query: str) -> bool:
 def _merge_expansion(base: QueryExpansion, result: dict[str, Any]) -> QueryExpansion:
     result_company_names = _list_field(result, "company_names")
     result_tickers = _list_field(result, "tickers")
+    merged_intent = "explain" if base.intent == "explain" else str(result.get("intent") or base.intent)
     if base.company_names:
         # The user explicitly mentioned a target company. Keep that identity
         # locked; LLM-added companies should be searched as terms only, not
@@ -299,7 +300,7 @@ def _merge_expansion(base: QueryExpansion, result: dict[str, Any]) -> QueryExpan
     merged = QueryExpansion(
         original_query=base.original_query,
         corrected_query=str(result.get("corrected_query") or base.corrected_query).strip() or base.corrected_query,
-        intent=str(result.get("intent") or base.intent),
+        intent=merged_intent,
         topic_class=str(result.get("topic_class") or base.topic_class),
         keywords=[*base.keywords, *_list_field(result, "keywords")],
         company_names=[*base.company_names, *result_company_names],
@@ -443,6 +444,8 @@ def _scope_terms(subject: str, terms: list[str]) -> list[str]:
 
 
 def _guess_intent(query: str) -> str:
+    if _looks_like_definition_question(query):
+        return "explain"
     if re.search(r"\b[036]\d{5}(?:\.(?:SZ|SH))?\b", query.upper()):
         return "company"
     if _classify_topic_class(query) in {"raw_material_chain", "component_chain", "industry_chain"}:
@@ -454,6 +457,12 @@ def _guess_intent(query: str) -> str:
     if any(word in query for word in ["上涨", "下跌", "业绩", "真实吗", "是否"]):
         return "claim"
     return "unknown"
+
+
+def _looks_like_definition_question(query: str) -> bool:
+    definition_terms = ["是什么", "是什么东西", "什么意思", "介绍一下", "科普", "定义", "概念"]
+    investment_terms = ["投资", "机会", "瓶颈", "卡位", "受益", "标的", "公司", "买", "估值", "研报"]
+    return any(term in query for term in definition_terms) and not any(term in query for term in investment_terms)
 
 
 def _classify_topic_class(query: str) -> str:
