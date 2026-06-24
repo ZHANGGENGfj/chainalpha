@@ -103,6 +103,12 @@ def parse_args() -> argparse.Namespace:
         help="Reserved for targeted collector. MediaCrawler main.py finance_news currently uses its internal limit.",
     )
     parser.add_argument("--company-map", type=Path, default=Path("./configs/company_map.yaml"), help="Company mapping YAML.")
+    parser.add_argument(
+        "--company-profile-source",
+        choices=["llm", "local", "hybrid", "resolver"],
+        default="llm",
+        help="Company profile source. llm avoids local company-map matching; local keeps the old company_map flow.",
+    )
     parser.add_argument("--financials", type=Path, default=None, help="Optional financial snapshot CSV. Leave empty to avoid sample data.")
     parser.add_argument("--prices", type=Path, default=None, help="Optional price snapshot CSV. Leave empty to avoid sample data.")
     parser.add_argument("--financial-report-dir", type=Path, default=None, help="Optional local annual/quarterly report PDF/text directory or file.")
@@ -234,16 +240,19 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
     media_data_root = resolve_media_crawler_data_root(args.media_crawler_root)
     if args.llm_summary:
         settings = load_settings()
+        """
         print(
             f"LLM provider: {settings.llm_provider} | "
             f"model={settings.llm_model} | base_url={settings.llm_base_url} | "
             f"api_key={'set' if settings.llm_api_key else 'missing'}",
             flush=True,
         )
+        """
     query_expansion = expand_user_query(
         args.topic,
         company_map=str(args.company_map),
         enable_llm=not args.no_query_expansion,
+        use_local_company_map=args.company_profile_source != "llm",
     )
     _apply_research_type_override(args, query_expansion)
     query_expansion_path = out_dir / "query_expansion.json"
@@ -276,6 +285,7 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
         search_keywords=query_expansion.search_keywords,
         query_expansion=query_expansion.to_dict(),
         enable_financial_web=not args.skip_financial_web,
+        company_profile_source=args.company_profile_source,
     )
 
     report_json = out_dir / "topic_research.json"

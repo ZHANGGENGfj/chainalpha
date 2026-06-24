@@ -121,8 +121,9 @@ def expand_user_query(
     *,
     company_map: str,
     enable_llm: bool = True,
+    use_local_company_map: bool = True,
 ) -> QueryExpansion:
-    base = _rule_expand_query(query, company_map=company_map)
+    base = _rule_expand_query(query, company_map=company_map, use_local_company_map=use_local_company_map)
     if not enable_llm:
         base.method = "rules_disabled_llm"
         return base
@@ -186,12 +187,15 @@ def _llm_expand_query(query: str, base: QueryExpansion, settings) -> dict[str, A
     )
 
 
-def _rule_expand_query(query: str, *, company_map: str) -> QueryExpansion:
+def _rule_expand_query(query: str, *, company_map: str, use_local_company_map: bool = True) -> QueryExpansion:
     clean_query = _clean_query(query)
     profiles: list[Any] = []
-    try:
-        local_profiles = load_company_profiles(company_map)
-    except Exception:
+    if use_local_company_map:
+        try:
+            local_profiles = load_company_profiles(company_map)
+        except Exception:
+            local_profiles = []
+    else:
         local_profiles = []
     try:
         external_profiles = resolve_query_profiles(clean_query, None)

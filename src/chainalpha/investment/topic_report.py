@@ -16,6 +16,12 @@ from chainalpha.investment.company_map import (
     search_company_profiles,
 )
 from chainalpha.investment.company_resolver import resolve_query_profiles
+from chainalpha.investment.llm_company_profiler import generate_company_profiles_with_llm
+from chainalpha.investment.eastmoney_snapshot import (
+    fetch_eastmoney_snapshots,
+    merge_financial_snapshot,
+    merge_price_snapshot,
+)
 from chainalpha.investment.market_data import (
     derive_financial_snapshots,
     derive_price_snapshots,
@@ -215,8 +221,16 @@ def build_topic_research_report(
     search_keywords: list[str] | None = None,
     query_expansion: dict[str, Any] | None = None,
     enable_financial_web: bool = True,
+    company_profile_source: str = "llm",
 ) -> TopicResearchReport:
-    profiles = resolve_query_profiles(topic, load_company_profiles(company_map))
+    profiles = _resolve_company_profiles(
+        topic,
+        company_map=company_map,
+        query_expansion=query_expansion,
+        source=company_profile_source,
+        top_k=top_k_companies,
+    )
+    profiles = _fill_missing_tickers_with_resolver(profiles)
     intent = _classify_intent(topic, profiles)
     planned_tasks = _build_task_plan(intent)
 
@@ -233,6 +247,11 @@ def build_topic_research_report(
     expanded_query = " ".join([topic, *expanded_terms[:16]]).strip()
     docs, results = manager.fetch_all(FetchRequest(query=topic, keywords=expanded_terms, limit=limit))
     warnings = [*manager.errors]
+    if company_profile_source == "llm":
+        if profiles:
+            warnings.append(f"公司画像来源：LLM 生成 {len(profiles)} 条候选画像，未使用本地 company_map 匹配；公司身份、代码和业务节点仍需公告/财报核验。")
+        else:
+            warnings.append("公司画像来源：LLM；当前未生成候选公司画像，后续公司分析将以数据缺口处理。")
     for result in results:
         warnings.extend(f"{result.source_name}: {err}" for err in result.errors)
 
@@ -264,6 +283,18 @@ def build_topic_research_report(
         financial_map = derive_financial_snapshots(sorted_docs, profiles)
     if not price_map:
         price_map = derive_price_snapshots(sorted_docs, profiles)
+    if enable_financial_web:
+        eastmoney_financials, eastmoney_prices, eastmoney_warnings = fetch_eastmoney_snapshots(profiles[:top_k_companies])
+        warnings.extend(eastmoney_warnings)
+        if eastmoney_financials or eastmoney_prices:
+            warnings.append(
+                f"Eastmoney snapshots loaded: financial={len(eastmoney_financials)}, price={len(eastmoney_prices)}; "
+                "used to fill missing PE/PB/PS/market-cap/core financial metrics."
+            )
+        for key, snapshot in eastmoney_financials.items():
+            financial_map[key] = merge_financial_snapshot(financial_map.get(key), snapshot)
+        for key, snapshot in eastmoney_prices.items():
+            price_map[key] = merge_price_snapshot(price_map.get(key), snapshot)
 
     company_views = _find_related_companies(
         topic=topic,
@@ -360,6 +391,63 @@ def build_topic_research_report(
         warnings=warnings,
         query_expansion=query_expansion or {},
     )
+
+
+def _resolve_company_profiles(
+    topic: str,
+    *,
+    company_map: str | Path,
+    query_expansion: dict[str, Any] | None,
+    source: str,
+    top_k: int,
+) -> list[CompanyProfile]:
+    mode = (source or "llm").strip().lower()
+    if mode == "llm":
+        return generate_company_profiles_with_llm(topic, query_expansion=query_expansion, max_profiles=top_k)
+    if mode == "resolver":
+        return resolve_query_profiles(topic, seed_profiles=None, top_k=top_k)
+    if mode == "hybrid":
+        llm_profiles = generate_company_profiles_with_llm(topic, query_expansion=query_expansion, max_profiles=top_k)
+        local_profiles = resolve_query_profiles(topic, load_company_profiles(company_map), top_k=top_k)
+        return _dedup_company_profiles([*llm_profiles, *local_profiles])[:top_k]
+    if mode == "local":
+        return resolve_query_profiles(topic, load_company_profiles(company_map), top_k=top_k)
+    raise ValueError(f"Unsupported company_profile_source: {source}")
+
+
+def _dedup_company_profiles(profiles: list[CompanyProfile]) -> list[CompanyProfile]:
+    seen: set[str] = set()
+    out: list[CompanyProfile] = []
+    for profile in profiles:
+        key = (profile.ticker or profile.name).strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(profile)
+    return out
+
+
+def _fill_missing_tickers_with_resolver(profiles: list[CompanyProfile]) -> list[CompanyProfile]:
+    filled: list[CompanyProfile] = []
+    for profile in profiles:
+        if profile.ticker:
+            filled.append(profile)
+            continue
+        resolved = resolve_query_profiles(profile.name, seed_profiles=None, top_k=1)
+        if not resolved or not resolved[0].ticker:
+            filled.append(profile)
+            continue
+        hit = resolved[0]
+        profile.ticker = hit.ticker
+        profile.exchange = profile.exchange or hit.exchange
+        profile.aliases = list(dict.fromkeys([*(profile.aliases or []), hit.name]))
+        profile.metadata = {
+            **(profile.metadata or {}),
+            "ticker_resolver": (hit.metadata or {}).get("resolver") or "company_resolver",
+            "ticker_resolved_name": hit.name,
+        }
+        filled.append(profile)
+    return filled
 
 
 def render_topic_research_markdown(report: TopicResearchReport) -> str:
@@ -951,41 +1039,34 @@ def _cashflow_quality_lines(primary: TopicCompanyView | None) -> list[str]:
 
 
 def _valuation_framework_lines(primary: TopicCompanyView | None) -> list[str]:
-    lines = [
-        "估值框架：至少需要历史估值分位、同行 PE/PB/PS、PEG、情景市值四类证据。",
-        "| 估值方法 | 需要数据 | 当前状态 |",
-        "| --- | --- | --- |",
-    ]
     f = primary.financial if primary else None
-    pe_pb_ps = "、".join(
-        item for item in [
-            f"PE={f.pe:.1f}" if f and f.pe is not None else "",
-            f"PB={f.pb:.1f}" if f and f.pb is not None else "",
-            f"PS={f.ps:.1f}" if f and f.ps is not None else "",
-        ]
-        if item
-    )
-    lines.extend([
-        f"| 当前倍数 | PE/PB/PS、市值 | {pe_pb_ps or '数据缺口'} |",
-        "| 历史分位 | 3年/5年估值分位 | 数据缺口 |",
-        "| 同行对比 | 可比公司估值、增速、净利率 | 数据缺口 |",
-        "| PEG | PE / 未来利润复合增速 | 数据缺口 |",
-        "| 情景估值 | 乐观/中性/悲观净利润和倍数 | 数据缺口 |",
-    ])
-    return lines
+    price = primary.price if primary else None
+    growth = _growth_base(f)
+    peg = _peg_text(f, growth)
+    rows = [
+        "| 估值方法 | 当前可用数据 | 系统判断 | 后续需要补充 |",
+        "| --- | --- | --- | --- |",
+        f"| 当前倍数 | {_valuation_multiples_text(f)} | {_valuation_level_judgement(f, price)} | 确认 PE/PB/PS 口径、扣非/非经常性损益 |",
+        f"| 市值与股价 | {_market_price_text(f, price)} | {_price_expectation_text(price)} | 历史涨跌幅、成交额、换手率、资金流 |",
+        "| 历史分位 | 当前缺少 3年/5年完整序列 | 暂不能判断历史高低位，只能用当前倍数和涨幅作风险提示 | 历史 PE/PB/PS 分位、估值中枢 |",
+        f"| PEG | {peg} | {_peg_judgement(f, growth)} | 三年利润 CAGR、一致预期、盈利预测修正 |",
+        f"| 情景估值 | {_scenario_valuation_brief(f, growth)} | 用增长率和倍数做方向性压力测试，不直接给目标价 | 绝对净利润、股本、同行估值表 |",
+    ]
+    return ["估值框架：优先使用已抓取的市值、PE/PB/PS、利润增速和股价涨跌幅；缺少绝对利润时，用指数化情景替代硬目标价。", *rows]
 
 
 def _forecast_model_lines(primary: TopicCompanyView | None) -> list[str]:
-    base_revenue = _fmt_pct(primary.financial.revenue_growth) if primary and primary.financial else "数据缺口"
-    base_profit = _fmt_pct(primary.financial.profit_growth) if primary and primary.financial else "数据缺口"
+    f = primary.financial if primary else None
+    revenue_growth = _growth_or_default(f.revenue_growth if f else None, default=12.0)
+    profit_growth = _growth_or_default(f.profit_growth if f else None, default=revenue_growth)
+    gross_margin = f.gross_margin if f and f.gross_margin is not None else None
+    forecast_rows = _forecast_rows(revenue_growth, profit_growth, gross_margin)
     return [
         "| 指标 | 最新实际/快照 | 2026E | 2027E | 2028E | 关键假设 |",
         "| --- | --- | --- | --- | --- | --- |",
-        f"| 收入增速 | {base_revenue} | 待填 | 待填 | 待填 | 产品出货、ASP、客户 CapEx |",
-        "| 毛利率 | " + ( _fmt_pct(primary.financial.gross_margin) if primary and primary.financial else "数据缺口" ) + " | 待填 | 待填 | 待填 | 产品结构、良率、价格竞争、上游成本 |",
-        f"| 利润增速 | {base_profit} | 待填 | 待填 | 待填 | 收入增长、毛利率、费用率 |",
-        "| EPS | 数据缺口 | 待填 | 待填 | 待填 | 需要股本和盈利预测 |",
-        "核心假设必须显式写出，并在后续季度用收入、毛利率、订单、现金流验证。当前系统不应在缺少预测数据时给出目标价。",
+        *forecast_rows,
+        "预测口径：若缺少绝对收入/净利润，系统以 2025=100 的指数化路径展示增长弹性，避免编造具体利润和 EPS。",
+        "验证重点：后续季度必须用订单、分业务收入、毛利率、费用率、经营现金流、存货和应收账款复核预测路径。",
     ]
 
 
@@ -999,12 +1080,26 @@ def _overseas_risk_lines(primary: TopicCompanyView | None) -> list[str]:
 
 def _expectation_gap_lines(report: TopicResearchReport, primary: TopicCompanyView | None) -> list[str]:
     topic = report.topic
+    f = primary.financial if primary else None
+    price = primary.price if primary else None
+    priced_in: list[str] = []
+    if f and f.market_cap is not None:
+        priced_in.append(f"市值 {_fmt_market_cap(f.market_cap)} 对应市场已给予较高关注度")
+    if f and f.pe is not None:
+        priced_in.append(f"PE {f.pe:.1f}x 已反映一定成长预期")
+    if price and price.change_3m is not None:
+        priced_in.append(f"近三个月涨跌幅 {price.change_3m:.1f}% 显示交易热度")
+    signal_titles = [signal.title for signal in report.signals[:5]]
+    catalysts = _catalyst_lines_from_signals(report, primary)
     return [
-        f"当前共识线索：市场容易围绕 `{topic}` 交易成长逻辑，但需要区分已定价部分和超预期部分。",
-        "已被定价的部分：行业景气、AI/算力链条、龙头叙事等可能已部分反映在估值和股价中。",
-        "可能超预期的部分：新产品放量节奏、毛利率维持能力、大客户订单持续性、现金流改善。",
+        f"当前共识线索：市场容易围绕 `{topic}` 交易成长逻辑，但需要拆分“已定价”和“可验证的超预期”。",
+        f"已被定价的部分：{_join_or_gap(priced_in, '缺少市值、估值倍数和股价涨跌幅，难以判断市场已定价程度')}。",
+        f"已抓取事件线索：{_join_or_gap(signal_titles, '暂无强事件信号')}。",
+        "可能超预期的部分：收入增速高于当前快照、利润增速持续快于收入、毛利率稳定或提升、经营现金流改善、订单/客户认证落地。",
         "可能低于预期的部分：价格竞争、客户 CapEx 放缓、产品认证延迟、存货/应收恶化、技术路线替代。",
-        "数据缺口：缺少一致预期、股价涨跌幅、估值分位和盈利预测修正数据，无法精确判断预期差大小。",
+        "催化剂清单：",
+        *_indent_items(catalysts),
+        "仍需补充：一致预期、盈利预测修正、历史估值分位、机构评级变化和资金流数据。没有这些数据时，预期差只能定性判断，不能直接外推目标价。",
     ]
 
 
@@ -1095,6 +1190,248 @@ def _fmt_num(value: float | None) -> str:
     return f"{value:.2f}" if value is not None else "数据缺口"
 
 
+def _core_financial_metrics_text(financial: FinancialSnapshot | None) -> str:
+    if financial is None:
+        return "数据缺口：未取得东方财富/结构化财务快照"
+    parts: list[str] = []
+    if getattr(financial, "eps", None) is not None:
+        parts.append(f"收益(一) {financial.eps:.3f}")
+    if financial.pe is not None:
+        parts.append(f"PE(动) {financial.pe:.2f}")
+    if getattr(financial, "bps", None) is not None:
+        parts.append(f"每股净资产 {financial.bps:.2f}")
+    if financial.pb is not None:
+        parts.append(f"市净率 {financial.pb:.2f}")
+    if getattr(financial, "revenue", None) is not None:
+        parts.append(f"总营收 {_fmt_market_cap(financial.revenue)}")
+    if financial.revenue_growth is not None:
+        parts.append(f"营收同比 {financial.revenue_growth:.2f}%")
+    if getattr(financial, "net_profit", None) is not None:
+        parts.append(f"净利润 {_fmt_market_cap(financial.net_profit)}")
+    if financial.profit_growth is not None:
+        parts.append(f"净利润同比 {financial.profit_growth:.2f}%")
+    if financial.gross_margin is not None:
+        parts.append(f"毛利率 {financial.gross_margin:.2f}%")
+    if getattr(financial, "net_margin", None) is not None:
+        parts.append(f"净利率 {financial.net_margin:.2f}%")
+    if financial.roe is not None:
+        parts.append(f"ROE {financial.roe:.2f}%")
+    if financial.debt_ratio is not None:
+        parts.append(f"负债率 {financial.debt_ratio:.2f}%")
+    if getattr(financial, "total_shares", None) is not None:
+        parts.append(f"总股本 {financial.total_shares:.2f}亿股")
+    if financial.market_cap is not None:
+        parts.append(f"总值 {_fmt_market_cap(financial.market_cap)}")
+    if getattr(financial, "float_shares", None) is not None:
+        parts.append(f"流通股 {financial.float_shares:.2f}亿股")
+    if getattr(financial, "float_market_cap", None) is not None:
+        parts.append(f"流值 {_fmt_market_cap(financial.float_market_cap)}")
+    source = (financial.metadata or {}).get("stockdata_url") or (financial.metadata or {}).get("quote_url")
+    if source:
+        parts.append(f"来源 {source}")
+    return "；".join(parts) if parts else "数据缺口：快照中没有可展示的核心指标"
+
+
+def _fmt_market_cap(value: float | None) -> str:
+    if value is None:
+        return "数据缺口"
+    if value >= 10000:
+        return f"{value / 10000:.2f}万亿元"
+    return f"{value:.1f}亿元"
+
+
+def _valuation_multiples_text(financial: FinancialSnapshot | None) -> str:
+    if financial is None:
+        return "PE/PB/PS/市值均为数据缺口"
+    parts = []
+    if financial.pe is not None:
+        parts.append(f"PE={financial.pe:.1f}x")
+    if financial.pb is not None:
+        parts.append(f"PB={financial.pb:.1f}x")
+    if financial.ps is not None:
+        parts.append(f"PS={financial.ps:.1f}x")
+    if financial.market_cap is not None:
+        parts.append(f"市值={_fmt_market_cap(financial.market_cap)}")
+    return "、".join(parts) if parts else "PE/PB/PS/市值均为数据缺口"
+
+
+def _market_price_text(financial: FinancialSnapshot | None, price: PriceSnapshot | None) -> str:
+    parts = []
+    if financial and financial.market_cap is not None:
+        parts.append(f"市值 {_fmt_market_cap(financial.market_cap)}")
+    if price:
+        if price.close is not None:
+            parts.append(f"收盘价 {price.close:.2f}")
+        if price.change_1m is not None:
+            parts.append(f"1M {price.change_1m:.1f}%")
+        if price.change_3m is not None:
+            parts.append(f"3M {price.change_3m:.1f}%")
+        if price.change_12m is not None:
+            parts.append(f"12M {price.change_12m:.1f}%")
+    return "；".join(parts) if parts else "行情/市值数据缺口"
+
+
+def _growth_or_default(value: float | None, *, default: float) -> float:
+    if value is None:
+        return default
+    return max(min(value, 80.0), -30.0)
+
+
+def _growth_base(financial: FinancialSnapshot | None) -> float:
+    if financial and financial.profit_growth is not None:
+        return _growth_or_default(financial.profit_growth, default=12.0)
+    if financial and financial.revenue_growth is not None:
+        return _growth_or_default(financial.revenue_growth, default=12.0)
+    return 12.0
+
+
+def _peg_text(financial: FinancialSnapshot | None, profit_cagr: float) -> str:
+    if financial is None or financial.pe is None:
+        return f"PE 数据缺口；临时利润 CAGR 假设 {profit_cagr:.1f}%"
+    if profit_cagr <= 0:
+        return f"PE={financial.pe:.1f}x；利润 CAGR 为负或缺乏增长，PEG 不适用"
+    return f"PE={financial.pe:.1f}x / 利润 CAGR {profit_cagr:.1f}% = PEG {financial.pe / profit_cagr:.2f}"
+
+
+def _peg_judgement(financial: FinancialSnapshot | None, profit_cagr: float) -> str:
+    if financial is None or financial.pe is None:
+        return "缺少 PE，无法计算 PEG。"
+    if profit_cagr <= 0:
+        return "利润增长为负或不可持续，PEG 不能支撑高估值。"
+    peg = financial.pe / profit_cagr
+    if peg <= 1:
+        return "PEG 低于或接近 1，若增长真实可持续，估值消化压力相对可控。"
+    if peg <= 2:
+        return "PEG 处于 1-2 区间，估值需要持续业绩兑现支撑。"
+    return "PEG 高于 2，市场对长期增长要求较高，需警惕估值压缩。"
+
+
+def _valuation_level_judgement(financial: FinancialSnapshot | None, price: PriceSnapshot | None) -> str:
+    points = []
+    if financial and financial.pe is not None:
+        if financial.pe >= 60:
+            points.append("PE 较高，隐含强成长预期")
+        elif financial.pe <= 20:
+            points.append("PE 不高，需判断盈利质量和周期属性")
+        else:
+            points.append("PE 处于中间区间")
+    if financial and financial.ps is not None and financial.ps >= 8:
+        points.append("PS 较高，市场更重视收入成长而非当期利润")
+    if price and price.change_3m is not None:
+        if price.change_3m >= 30:
+            points.append("短期涨幅较大，估值容错率下降")
+        elif price.change_3m <= -20:
+            points.append("短期回撤较大，需要区分估值出清还是基本面恶化")
+    return "；".join(points) + "。" if points else "当前缺少足够估值倍数和行情数据，不能判断贵或便宜。"
+
+
+def _price_expectation_text(price: PriceSnapshot | None) -> str:
+    if price is None:
+        return "缺少股价区间涨跌幅，无法判断交易拥挤度"
+    if price.change_3m is not None and price.change_3m >= 30:
+        return "短期涨幅较高，市场可能已提前交易部分利好"
+    if price.change_3m is not None and price.change_3m <= -20:
+        return "短期回撤较大，需确认是否出现基本面下修"
+    return "股价表现未显示极端拥挤或极端悲观，需要结合成交额和资金流继续判断"
+
+
+def _scenario_valuation_brief(financial: FinancialSnapshot | None, growth: float) -> str:
+    if financial and financial.market_cap is not None and financial.pe is not None:
+        return f"以当前市值 {_fmt_market_cap(financial.market_cap)} 和 PE {financial.pe:.1f}x 为锚，测试利润增速 {growth:.1f}% 上下浮动。"
+    return f"缺少绝对净利润/市值/PE，先以利润指数 2025=100、基准增速 {growth:.1f}% 做压力测试。"
+
+
+def _scenario_valuation_rows(financial: FinancialSnapshot | None, growth: float) -> list[str]:
+    scenarios = [
+        ("乐观", growth + 8, 1.10, "增长兑现且估值维持/小幅扩张"),
+        ("中性", growth, 1.00, "增长按当前假设兑现，估值维持"),
+        ("悲观", max(growth - 10, -20), 0.80, "增长下修且估值收缩"),
+    ]
+    rows = []
+    for name, profit_growth, multiple_factor, meaning in scenarios:
+        profit_index = 100 * (1 + profit_growth / 100)
+        if financial and financial.market_cap is not None:
+            implied = financial.market_cap * (1 + profit_growth / 100) * multiple_factor
+            target = _fmt_market_cap(implied)
+        else:
+            target = f"利润指数 {profit_index:.1f}，估值倍数因子 {multiple_factor:.2f}"
+        rows.append(f"| {name} | {profit_growth:.1f}% | 当前倍数 x {multiple_factor:.2f} | {target} | {meaning} |")
+    return rows
+
+
+def _forecast_rows(revenue_growth: float, profit_growth: float, gross_margin: float | None) -> list[str]:
+    rev_path = _index_path(revenue_growth, years=3)
+    profit_path = _index_path(profit_growth, years=3)
+    optimistic_rev = _index_path(revenue_growth + 8, years=3)
+    pessimistic_rev = _index_path(max(revenue_growth - 8, -10), years=3)
+    margin_base = _fmt_pct(gross_margin)
+    margin_up = f"{gross_margin + 1.0:.1f}%" if gross_margin is not None else "基准 +1.0pct"
+    margin_down = f"{gross_margin - 1.5:.1f}%" if gross_margin is not None else "基准 -1.5pct"
+    return [
+        f"| 收入指数（2025=100） | 100 | {rev_path[0]:.1f} | {rev_path[1]:.1f} | {rev_path[2]:.1f} | 基准收入增速 {revenue_growth:.1f}% |",
+        f"| 乐观收入指数 | 100 | {optimistic_rev[0]:.1f} | {optimistic_rev[1]:.1f} | {optimistic_rev[2]:.1f} | 收入增速上浮 8pct |",
+        f"| 悲观收入指数 | 100 | {pessimistic_rev[0]:.1f} | {pessimistic_rev[1]:.1f} | {pessimistic_rev[2]:.1f} | 收入增速下浮 8pct |",
+        f"| 毛利率 | {margin_base} | {margin_up} | {margin_base} | {margin_down} | 产品结构、良率、价格竞争、上游成本 |",
+        f"| 净利润指数（2025=100） | 100 | {profit_path[0]:.1f} | {profit_path[1]:.1f} | {profit_path[2]:.1f} | 基准利润增速 {profit_growth:.1f}% |",
+        "| EPS | 数据缺口 | 待接入股本 | 待接入股本 | 待接入股本 | 需要股本和摊薄因素 |",
+    ]
+
+
+def _index_path(growth: float, *, years: int) -> list[float]:
+    values = []
+    current = 100.0
+    for _ in range(years):
+        current *= 1 + growth / 100
+        values.append(current)
+    return values
+
+
+def _peer_valuation_lines(report: TopicResearchReport, primary: TopicCompanyView | None) -> list[str]:
+    rows = ["| 公司 | PE | PB | PS | 利润增速 | 投研含义 |", "| --- | ---: | ---: | ---: | ---: | --- |"]
+    peers = [row for row in report.companies if not primary or row.company.name != primary.company.name]
+    for row in peers[:6]:
+        f = row.financial
+        rows.append(
+            f"| {row.company.name} | {_fmt_plain(f.pe if f else None)} | {_fmt_plain(f.pb if f else None)} | {_fmt_plain(f.ps if f else None)} | {_fmt_pct(f.profit_growth if f else None)} | 同产业链/同主题可比，需确认业务可比性 |"
+        )
+    if len(rows) == 2:
+        rows.append("| 数据缺口 | - | - | - | - | 当前没有可用同行估值快照，需要补充可比公司池和估值数据 |")
+    return rows
+
+
+def _fmt_plain(value: float | None) -> str:
+    return f"{value:.1f}" if value is not None else "-"
+
+
+def _join_or_gap(items: list[str], gap: str) -> str:
+    clean = [item for item in items if item]
+    return "；".join(clean) if clean else gap
+
+
+def _catalyst_lines_from_signals(report: TopicResearchReport, primary: TopicCompanyView | None) -> list[str]:
+    catalysts: list[str] = []
+    for signal in report.signals[:8]:
+        event_type = signal.event.event_type
+        if event_type in POSITIVE_EVENT_HINTS or signal.weak_signal_score >= 0.6:
+            catalysts.append(f"{signal.title}：{event_type}，需用公告/财报确认其对收入、毛利率和现金流的影响。")
+    if primary and primary.financial:
+        f = primary.financial
+        if f.revenue_growth is not None and f.revenue_growth >= 20:
+            catalysts.append(f"收入增速 {_fmt_pct(f.revenue_growth)} 已具备成长线索，后续看能否连续兑现。")
+        if f.profit_growth is not None and f.profit_growth >= 20:
+            catalysts.append(f"利润增速 {_fmt_pct(f.profit_growth)} 若持续高于收入增速，将形成盈利能力改善催化。")
+        if f.gross_margin is not None:
+            catalysts.append(f"毛利率 {_fmt_pct(f.gross_margin)} 是核心跟踪点，稳定或提升会支撑估值。")
+    if not catalysts:
+        catalysts = [
+            "季度财报披露：验证收入增速、毛利率、费用率和现金流。",
+            "订单/客户认证公告：验证增长是否有真实客户和订单支撑。",
+            "产品量产或技术路线进展：验证产品结构升级和毛利率弹性。",
+            "下游 CapEx 上修：验证需求端是否继续扩张。",
+        ]
+    return catalysts[:8]
+
+
 def render_professional_topic_report(report: TopicResearchReport) -> str:
     primary = _primary_company(report)
     title_name = primary.company.name if primary else report.topic
@@ -1112,12 +1449,11 @@ def render_professional_topic_report(report: TopicResearchReport) -> str:
     _extend_section(lines, "4. 财务深度分析", _financial_deep_dive_lines(primary))
     _extend_section(lines, "5. 行业与产业链分析", _industry_chain_analysis_lines(report, primary))
     _extend_section(lines, "6. 竞争格局", _competitive_landscape_lines(report, primary))
-    _extend_section(lines, "7. 估值分析", _valuation_analysis_lines(report, primary))
-    _extend_section(lines, "8. 盈利预测", _earnings_forecast_lines(primary))
-    _extend_section(lines, "9. 预期差与催化剂", _expectation_catalyst_lines(report, primary))
-    _extend_section(lines, "10. 风险与证伪条件", _risk_disproof_lines(report, primary))
-    _extend_section(lines, "11. 跟踪指标仪表盘", _tracking_dashboard_lines(report, primary))
-    _extend_section(lines, "12. 附录", _appendix_lines(report, primary))
+    _extend_section(lines, "7. 盈利预测", _earnings_forecast_lines(primary))
+    _extend_section(lines, "8. 预期差与催化剂", _expectation_catalyst_lines(report, primary))
+    _extend_section(lines, "9. 风险与证伪条件", _risk_disproof_lines(report, primary))
+    _extend_section(lines, "10. 跟踪指标仪表盘", _tracking_dashboard_lines(report, primary))
+    _extend_section(lines, "11. 附录", _appendix_lines(report, primary))
     return "\n".join(lines)
 
 
@@ -1201,39 +1537,51 @@ def _competitive_landscape_lines(report: TopicResearchReport, primary: TopicComp
 
 def _valuation_analysis_lines(report: TopicResearchReport, primary: TopicCompanyView | None) -> list[str]:
     return [
-        "历史估值分位：数据缺口，需补充过去 3 年/5 年 PE、PB、PS 分位。",
-        "同行估值对比：",
-        *_indent_items(_valuation_framework_lines(primary)),
-        "PEG：数据缺口，需当前 PE 与未来利润复合增速。",
-        "情景估值：",
-        "| 情景 | 净利润假设 | 估值倍数 | 对应市值 | 隐含空间 |",
-        "| --- | --- | --- | --- | --- |",
-        "| 乐观 | 数据缺口 | 数据缺口 | 数据缺口 | 数据缺口 |",
-        "| 中性 | 数据缺口 | 数据缺口 | 数据缺口 | 数据缺口 |",
-        "| 悲观 | 数据缺口 | 数据缺口 | 数据缺口 | 数据缺口 |",
-        "当前系统估值观察：",
-        *_indent_items(report.valuation_view),
+        "本版暂不输出估值分析。",
+        "已临时关闭：当前估值倍数、历史估值分位、同行估值对比、PEG、情景估值和目标价相关内容。",
+        "保留本节标题仅用于维持报告编号结构；后续需要恢复时，可重新打开 `_valuation_analysis_lines` 的完整估值框架。",
     ]
 
 
 def _earnings_forecast_lines(primary: TopicCompanyView | None) -> list[str]:
+    f = primary.financial if primary else None
+    revenue_growth = _growth_or_default(f.revenue_growth if f else None, default=12.0)
+    profit_growth = _growth_or_default(f.profit_growth if f else None, default=revenue_growth)
+    gross_margin = f.gross_margin if f and f.gross_margin is not None else None
     return [
         "未来三年收入预测：",
-        *_indent_items(_forecast_model_lines(primary)[:3]),
-        "毛利率假设：需基于产品结构、ASP、良率、上游成本和竞争格局建立；当前为数据缺口。",
-        "净利润预测：需基于收入、毛利率、费用率、税率和投资收益拆解；当前为数据缺口。",
-        "EPS 预测：需补充股本、摊薄因素和净利润预测；当前为数据缺口。",
-        "敏感性分析：建议至少测试收入增速、毛利率、估值倍数三个变量。",
+        *_forecast_model_lines(primary),
+        f"收入假设：以最新可得营收增速 {_fmt_pct(f.revenue_growth if f else None)} 为基准；若缺失，则用审慎默认 {revenue_growth:.1f}% 建立指数化框架。",
+        f"毛利率假设：当前毛利率 {_fmt_pct(gross_margin)}；乐观情景假设产品结构升级带来 1.0pct 改善，中性保持稳定，悲观因价格竞争下降 1.5pct。",
+        f"净利润预测：以最新利润增速 {_fmt_pct(f.profit_growth if f else None)} 为基准；若缺失，则以收入增速作为临时锚，后续用费用率、税率和非经常性损益修正。",
+        "EPS 预测：当前缺少股本和摊薄因素，因此不输出具体 EPS；接入股本后可由净利润预测 / 摊薄股本自动计算。",
+        "敏感性分析：",
+        "| 变量 | 乐观 | 中性 | 悲观 | 影响方向 |",
+        "| --- | --- | --- | --- | --- |",
+        f"| 收入增速 | {revenue_growth + 8:.1f}% | {revenue_growth:.1f}% | {max(revenue_growth - 8, -10):.1f}% | 决定利润弹性和估值消化速度 |",
+        f"| 毛利率变化 | +1.0pct | 0.0pct | -1.5pct | 决定盈利质量和估值溢价 |",
+        "| 估值倍数 | 维持/扩张 | 维持 | 收缩 | 决定股价空间和回撤风险 |",
     ]
 
 
 def _expectation_catalyst_lines(report: TopicResearchReport, primary: TopicCompanyView | None) -> list[str]:
+    f = primary.financial if primary else None
+    price = primary.price if primary else None
+    priced_in = []
+    if f and f.market_cap is not None:
+        priced_in.append(f"市值 {_fmt_market_cap(f.market_cap)} 已体现较强关注度")
+    if f and f.pe is not None:
+        priced_in.append(f"PE {f.pe:.1f}x 反映成长预期")
+    if price and price.change_3m is not None:
+        priced_in.append(f"近三个月涨跌幅 {price.change_3m:.1f}%")
     return [
         "市场已经定价什么：",
-        *_indent_items(_expectation_gap_lines(report, primary)[:2]),
-        "可能超预期什么：新产品放量节奏、毛利率维持能力、大客户订单持续性、现金流改善。",
-        "未来催化剂：财报披露、订单/认证公告、产品量产进度、下游 CapEx 上修、行业价格变化。",
-        "关键时间点：季度财报、年度报告、重要客户资本开支披露、行业展会或技术路线发布。",
+        *_indent_items(priced_in or ["数据缺口：缺少市值、估值倍数和股价涨跌幅，无法量化已定价程度。"]),
+        "可能超预期什么：收入增速继续上修、利润增速快于收入、毛利率稳定或改善、大客户订单/认证公告、现金流改善。",
+        "未来催化剂：",
+        *_indent_items(_catalyst_lines_from_signals(report, primary)),
+        "关键时间点：季度财报、年度报告、重要客户资本开支披露、产业链展会、新产品认证或量产公告。",
+        "负向催化剂：毛利率连续下行、存货/应收快于收入、订单不及预期、下游 CapEx 放缓、估值倍数压缩。",
     ]
 
 

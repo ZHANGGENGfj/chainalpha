@@ -4,13 +4,14 @@ import json
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 
@@ -36,6 +37,7 @@ class CreateRunRequest(BaseModel):
     chain_visual: bool = True
     report_quality_check: bool = True
     include_a_share_reports: bool = False
+    company_profile_source: Literal["llm", "local", "hybrid", "resolver"] = "llm"
     skip_refresh_news: bool = True
     limit: int = Field(80, ge=1, le=300)
     top_k_chunks: int = Field(60, ge=1, le=300)
@@ -171,6 +173,27 @@ def get_run(run_id: str) -> dict:
     return _run_summary(path)
 
 
+@router.get("/runs/{run_id}/stream")
+def stream_run(run_id: str) -> StreamingResponse:
+    path = _run_path(run_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    def events():
+        last_payload = ""
+        for _ in range(60 * 60):
+            summary = _run_summary(path)
+            payload = json.dumps(summary, ensure_ascii=False)
+            if payload != last_payload:
+                yield f"data: {payload}\n\n"
+                last_payload = payload
+            if summary.get("status") in {"completed", "failed", "unknown"}:
+                break
+            time.sleep(1)
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
 @router.get("/runs/{run_id}/report")
 def get_report(run_id: str, format: Literal["markdown", "html"] = "markdown") -> dict:
     path = _run_path(run_id)
@@ -222,6 +245,8 @@ def _build_run_command(req: CreateRunRequest, run_id: str) -> list[str]:
         str(req.top_k_chunks),
         "--top-k-companies",
         str(req.top_k_companies),
+        "--company-profile-source",
+        req.company_profile_source,
         "--output-mode",
         "final",
     ]

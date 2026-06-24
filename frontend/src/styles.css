@@ -384,6 +384,51 @@ pre {
   font-size: 13px;
 }
 
+.progress-steps span.done {
+  background: #e7f4ef;
+  color: #08745a;
+}
+
+.progress-steps span.active {
+  background: #111;
+  color: white;
+}
+
+.stream-box {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fafafa;
+  padding: 12px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.stream-line {
+  color: #333;
+  font-family: "Cascadia Mono", "Consolas", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.stream-line.muted {
+  color: var(--muted);
+}
+
+.cursor-dot {
+  display: inline-block;
+  width: 6px;
+  height: 14px;
+  border-radius: 4px;
+  background: #111;
+  margin-left: 5px;
+  vertical-align: -2px;
+  animation: blink 1s steps(2, start) infinite;
+}
+
 .log-tail {
   max-height: 220px;
   overflow: auto;
@@ -398,6 +443,12 @@ pre {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
   }
 }
 

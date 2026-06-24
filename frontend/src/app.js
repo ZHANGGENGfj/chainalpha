@@ -152,13 +152,13 @@ function renderMessages(messages) {
 function renderMessage(message) {
   if (message.role === "user") {
     return `
-      <article class="message user-message">
+      <article class="message user-message" data-message-id="${escapeAttr(message.id || "")}">
         <div class="message-body user-body">${escapeHtml(message.text)}</div>
       </article>
     `;
   }
   return `
-    <article class="message assistant-message">
+    <article class="message assistant-message" data-message-id="${escapeAttr(message.id || "")}">
       <div class="assistant-avatar">CA</div>
       <div class="message-body assistant-body">
         ${message.status === "running" ? renderThinking(message) : renderAssistantAnswer(message)}
@@ -168,6 +168,8 @@ function renderMessage(message) {
 }
 
 function renderThinking(message) {
+  const steps = ["创建任务", "查询扩展", "数据抓取", "事件抽取", "产业链分析", "财务验证", "报告生成", "质量检查"];
+  const activeIndex = inferProgressIndex(message.stage, message.logTail);
   return `
     <div class="thinking">
       <div class="thinking-title">
@@ -176,11 +178,22 @@ function renderThinking(message) {
       </div>
       <p>${escapeHtml(message.stage || "任务已提交，正在准备数据。")}</p>
       <div class="progress-steps">
-        ${["创建任务", "查询扩展", "数据抓取", "事件抽取", "产业链分析", "财务验证", "报告生成", "质量检查"]
-          .map((step) => `<span>${escapeHtml(step)}</span>`)
+        ${steps
+          .map((step, index) => `<span class="${index < activeIndex ? "done" : index === activeIndex ? "active" : ""}">${escapeHtml(step)}</span>`)
           .join("")}
       </div>
-      ${message.logTail ? `<pre class="log-tail">${escapeHtml(message.logTail)}</pre>` : ""}
+      ${renderStream(message)}
+    </div>
+  `;
+}
+
+function renderStream(message) {
+  const lines = message.streamLines?.length ? message.streamLines : streamLinesFromLog(message.logTail || "");
+  if (!lines.length) return "";
+  return `
+    <div class="stream-box">
+      ${lines.slice(-18).map((line) => `<div class="stream-line">${escapeHtml(line)}</div>`).join("")}
+      <div class="stream-line muted">正在持续接收运行日志<span class="cursor-dot"></span></div>
     </div>
   `;
 }
@@ -258,10 +271,14 @@ function bindEvents() {
   });
 
   document.querySelectorAll("[data-artifact]").forEach((button) => {
-    button.addEventListener("click", () => {
-      if (state.apiMode !== "api") return;
-      window.open(`/api/runs/${encodeURIComponent(button.dataset.runId)}/files/${encodeURIComponent(button.dataset.artifact)}`, "_blank");
-    });
+    bindArtifactButton(button);
+  });
+}
+
+function bindArtifactButton(button) {
+  button.addEventListener("click", () => {
+    if (state.apiMode !== "api") return;
+    window.open(`/api/runs/${encodeURIComponent(button.dataset.runId)}/files/${encodeURIComponent(button.dataset.artifact)}`, "_blank");
   });
 }
 
@@ -281,7 +298,7 @@ async function createResearchRun() {
     textarea.style.height = "auto";
   }
 
-  conversation.messages.push({role: "user", text: question});
+  conversation.messages.push({id: `user-${Date.now()}`, role: "user", text: question});
   updateCurrentConversationTitle(question);
 
   const assistantMessage = {
@@ -318,7 +335,7 @@ async function createResearchRun() {
     assistantMessage.runId = result.run_id;
     saveConversations();
     render();
-    await pollRunUntilDone(result.run_id, assistantMessage.id);
+    await streamRunUntilDone(result.run_id, assistantMessage.id);
   } catch (error) {
     assistantMessage.status = "failed";
     assistantMessage.statusText = "创建任务失败";
@@ -328,6 +345,85 @@ async function createResearchRun() {
     state.isCreating = false;
     render();
   }
+}
+
+function streamRunUntilDone(runId, messageId) {
+  return new Promise((resolve) => {
+    if (typeof EventSource === "undefined") {
+      pollRunUntilDone(runId, messageId).then(resolve);
+      return;
+    }
+    const message = findMessage(messageId);
+    if (!message) {
+      resolve();
+      return;
+    }
+    let settled = false;
+    let opened = false;
+    const source = new EventSource(`${apiBase()}/api/runs/${encodeURIComponent(runId)}/stream`);
+
+    source.onopen = () => {
+      opened = true;
+    };
+
+    source.onmessage = async (event) => {
+      const current = findMessage(messageId);
+      if (!current || settled) return;
+      let runInfo;
+      try {
+        runInfo = JSON.parse(event.data);
+      } catch (error) {
+        return;
+      }
+      current.runId = runId;
+      current.stage = runInfo.stage || "运行中";
+      current.logTail = runInfo.log_tail || "";
+      current.streamLines = streamLinesFromLog(current.logTail);
+
+      if (runInfo.status === "completed") {
+        settled = true;
+        source.close();
+        const report = await fetchReport(runId, "markdown");
+        current.status = "completed";
+        current.statusText = "已完成";
+        current.source = report.source || "";
+        current.sections = parseMarkdownSections(report.content);
+        current.artifacts = runInfo.artifacts || [];
+        saveConversations();
+        await refreshRunsSilently();
+        updateAssistantMessage(current);
+        resolve();
+        return;
+      }
+
+      if (runInfo.status === "failed") {
+        settled = true;
+        source.close();
+        current.status = "failed";
+        current.statusText = "失败";
+        current.sections = [{title: "任务失败", body: [runInfo.log_tail || "请查看 run.log。"]}];
+        saveConversations();
+        updateAssistantMessage(current);
+        resolve();
+        return;
+      }
+
+      current.status = runInfo.status || "running";
+      saveConversations();
+      updateAssistantMessage(current, {follow: false});
+    };
+
+    source.onerror = () => {
+      source.close();
+      if (settled) return;
+      if (!opened) {
+        pollRunUntilDone(runId, messageId).then(resolve);
+        return;
+      }
+      settled = true;
+      pollRunUntilDone(runId, messageId).then(resolve);
+    };
+  });
 }
 
 async function pollRunUntilDone(runId, messageId) {
@@ -341,9 +437,8 @@ async function pollRunUntilDone(runId, messageId) {
       message.status = runInfo.status || "running";
       message.stage = runInfo.stage || "运行中";
       message.logTail = runInfo.log_tail || "";
+      message.streamLines = streamLinesFromLog(message.logTail);
       saveConversations();
-      forceScrollBottom = false;
-      render();
 
       if (runInfo.status === "completed") {
         const report = await fetchReport(runId, "markdown");
@@ -354,7 +449,7 @@ async function pollRunUntilDone(runId, messageId) {
         message.artifacts = runInfo.artifacts || [];
         saveConversations();
         await refreshRunsSilently();
-        render();
+        updateAssistantMessage(message);
         return;
       }
 
@@ -363,16 +458,45 @@ async function pollRunUntilDone(runId, messageId) {
         message.statusText = "失败";
         message.sections = [{title: "任务失败", body: [runInfo.log_tail || "请查看 run.log。"]}];
         saveConversations();
-        render();
+        updateAssistantMessage(message);
         return;
       }
+
+      updateAssistantMessage(message, {follow: false});
     } catch (error) {
       message.stage = "等待后端响应";
       saveConversations();
-      forceScrollBottom = false;
-      render();
+      updateAssistantMessage(message, {follow: false});
     }
   }
+}
+
+function updateAssistantMessage(message, {follow = false} = {}) {
+  const element = messageElement(message.id);
+  if (!element) {
+    render();
+    return;
+  }
+  const scroller = document.querySelector(".chat-scroll");
+  const previousTop = scroller?.scrollTop || 0;
+  const wasNearBottom = isNearBottom(scroller);
+  element.outerHTML = renderMessage(message);
+  const nextElement = messageElement(message.id);
+  nextElement?.querySelectorAll("[data-artifact]").forEach(bindArtifactButton);
+  requestAnimationFrame(() => {
+    const current = document.querySelector(".chat-scroll");
+    if (!current) return;
+    if (follow || wasNearBottom) {
+      current.scrollTop = current.scrollHeight;
+    } else {
+      current.scrollTop = Math.min(previousTop, current.scrollHeight);
+    }
+  });
+}
+
+function messageElement(messageId) {
+  return [...document.querySelectorAll("[data-message-id]")]
+    .find((item) => item.dataset.messageId === messageId) || null;
 }
 
 function ensureActiveConversation(question) {
@@ -489,11 +613,16 @@ function autoSizeTextarea() {
 function captureScrollState() {
   const scroller = document.querySelector(".chat-scroll");
   if (!scroller) return null;
-  const distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
   return {
     top: scroller.scrollTop,
-    wasNearBottom: distanceFromBottom < 80
+    wasNearBottom: isNearBottom(scroller)
   };
+}
+
+function isNearBottom(scroller) {
+  if (!scroller) return false;
+  const distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+  return distanceFromBottom < 120;
 }
 
 function restoreScrollState(scrollState) {
@@ -521,6 +650,36 @@ function toggle(name, label, checked) {
       ${label}
     </label>
   `;
+}
+
+function streamLinesFromLog(logTail) {
+  return String(logTail || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !line.startsWith("\r"))
+    .filter((line) => !isNoisyProgressLine(line))
+    .slice(-24);
+}
+
+function isNoisyProgressLine(line) {
+  const normalized = String(line || "")
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
+    .trim();
+  return /^\d{1,3}%\|.*\|\s*\d+\s*\/\s*\d+\s*\[/.test(normalized)
+    || /^\d{1,3}%\s+\S+\s+\d+\s*\/\s*\d+\s*\[/.test(normalized);
+}
+
+function inferProgressIndex(stage = "", logTail = "") {
+  const text = `${stage}\n${logTail}`;
+  if (/质量|Report Quality|report_quality/i.test(text)) return 7;
+  if (/LLM|报告|Markdown|HTML|professional|Chain Bottleneck|Final/i.test(text)) return 6;
+  if (/财务|financial|valuation|估值|cash/i.test(text)) return 5;
+  if (/产业链|chain|bottleneck|visual|node/i.test(text)) return 4;
+  if (/signal|事件|chunks|analyze/i.test(text)) return 3;
+  if (/fetch|crawler|documents|MediaCrawler|抓取|资料|docs/i.test(text)) return 2;
+  if (/Query expansion|关键词|扩展/i.test(text)) return 1;
+  return 0;
 }
 
 function escapeHtml(value) {

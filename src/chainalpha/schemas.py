@@ -175,16 +175,24 @@ class FinancialSnapshot:
     company: str
     ticker: str | None = None
     period: str | None = None
+    revenue: float | None = None
+    net_profit: float | None = None
     revenue_growth: float | None = None
     profit_growth: float | None = None
     gross_margin: float | None = None
+    net_margin: float | None = None
     roe: float | None = None
+    eps: float | None = None
+    bps: float | None = None
     operating_cash_flow: float | None = None
     debt_ratio: float | None = None
     pe: float | None = None
     pb: float | None = None
     ps: float | None = None
     market_cap: float | None = None
+    float_market_cap: float | None = None
+    total_shares: float | None = None
+    float_shares: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
