@@ -152,8 +152,10 @@ class ReportQualityAudit:
         return {
             "topic": self.topic,
             "needs_supplement": self.needs_supplement,
+            "gate": self.gate_status,
             "gate_status": self.gate_status,
             "conclusion_policy": self.conclusion_policy,
+            "evidence_stats": self.evidence_summary.to_dict(),
             "evidence_summary": self.evidence_summary.to_dict(),
             "evidence_items": [item.to_dict() for item in self.evidence_items],
             "issues": [item.to_dict() for item in self.issues],
@@ -293,6 +295,7 @@ def _extract_evidence_items(report_data: dict[str, Any]) -> list[EvidenceItem]:
         *(report_data.get("selected_documents") or []),
         *(report_data.get("recent_documents") or []),
         *(report_data.get("recent_news") or []),
+        *_tool_research_evidence_docs(report_data),
     ]
     for doc in docs[:30]:
         if not isinstance(doc, dict):
@@ -329,6 +332,9 @@ def _extract_evidence_items(report_data: dict[str, Any]) -> list[EvidenceItem]:
         source_type = str(event.get("source_type") or signal.get("source_type") or "")
         url = str(event.get("source_path") or event.get("url") or signal.get("source_path") or signal.get("url") or "")
         confidence, reason = _confidence_for_source(source=source, source_type=source_type, url=url)
+        if _is_low_quality_signal_evidence(signal):
+            confidence = "low"
+            reason = "规则信号来自F10/财务网页/搜索页等弱来源，不能单独证明订单、政策、扩产或客户认证。"
         items.append(
             EvidenceItem(
                 claim=title,
@@ -394,6 +400,8 @@ def _summarize_evidence(items: list[EvidenceItem]) -> EvidenceSummary:
 
 def _confidence_for_source(*, source: str, source_type: str, url: str) -> tuple[str, str]:
     text = f"{source} {source_type} {url}".lower()
+    if _looks_like_search_landing_page(source=source, source_type=source_type, url=url, title=""):
+        return "low", "这是搜索入口页或结果页，只能作为检索线索，不能作为事实证据。"
     if any(token.lower() in text for token in TRUSTED_SOURCE_TOKENS):
         return "high", "来源类型接近公告、财报或交易所文件，可作为高置信度证据。"
     if any(token.lower() in text for token in MEDIUM_SOURCE_TOKENS):
@@ -517,7 +525,11 @@ def _fetch_supplemental_documents(queries: list[str], *, limit: int) -> tuple[li
     )
     try:
         docs = connector.fetch(FetchRequest(query=" ".join(queries[:3]), keywords=queries, limit=limit))
-        return docs, []
+        filtered = _filter_supplemental_documents(docs, limit=limit)
+        warnings = []
+        if len(filtered) < len(docs):
+            warnings.append(f"filtered {len(docs) - len(filtered)} supplemental search landing/duplicate pages")
+        return filtered, warnings
     except Exception as exc:  # noqa: BLE001
         return [], [f"supplemental web search failed: {type(exc).__name__}: {exc}"]
 
@@ -601,10 +613,106 @@ def _target_name(topic: str, report_data: dict[str, Any] | None) -> str:
     return topic.strip()
 
 
+def _tool_research_evidence_docs(report_data: dict[str, Any]) -> list[dict[str, Any]]:
+    tool_research = report_data.get("tool_research") or {}
+    docs: list[dict[str, Any]] = []
+    for item in tool_research.get("evidence") or []:
+        if not isinstance(item, dict):
+            continue
+        docs.append(
+            {
+                "title": item.get("title") or "LangGraph工具检索证据",
+                "summary": item.get("content_excerpt") or "",
+                "content": item.get("content_excerpt") or "",
+                "source": item.get("source") or "langgraph_tool_agent",
+                "source_type": item.get("source_type") or "tool_research",
+                "url": item.get("url"),
+                "path": item.get("path"),
+            }
+        )
+    return docs
+
+
 def _doc_to_dict(doc: SourceDocument) -> dict[str, Any]:
     data = doc.to_dict()
     data["content"] = str(data.get("content") or "")[:1200]
     return data
+
+
+def _filter_supplemental_documents(docs: list[SourceDocument], *, limit: int) -> list[SourceDocument]:
+    out: list[SourceDocument] = []
+    seen: set[str] = set()
+    for doc in docs:
+        data = doc.to_dict()
+        title = str(data.get("title") or "")
+        url = str(data.get("url") or data.get("path") or "")
+        source = str(data.get("source") or "")
+        source_type = str(data.get("source_type") or "")
+        content = str(data.get("content") or "")
+        key = url or title
+        if not key or key in seen:
+            continue
+        if _looks_like_search_landing_page(source=source, source_type=source_type, url=url, title=title):
+            continue
+        if len(content.strip()) < 80 and not url:
+            continue
+        seen.add(key)
+        out.append(doc)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _looks_like_search_landing_page(*, source: str, source_type: str, url: str, title: str) -> bool:
+    text = f"{source} {source_type} {url} {title}".lower()
+    search_markers = [
+        "/search",
+        "search?",
+        "search.php",
+        "searchlist",
+        "searchresult",
+        "so.eastmoney.com",
+        "search.10jqka.com.cn",
+        "搜索结果",
+        "站内搜索",
+    ]
+    return any(marker in text for marker in search_markers)
+
+
+def _is_low_quality_signal_evidence(signal: dict[str, Any]) -> bool:
+    event = signal.get("event") if isinstance(signal.get("event"), dict) else signal
+    event_type = str(event.get("event_type") or signal.get("event_type") or "").upper()
+    source = str(event.get("source") or signal.get("source") or "")
+    source_type = str(event.get("source_type") or signal.get("source_type") or "")
+    title = str(signal.get("title") or event.get("description") or "")
+    evidence = " ".join(str(item) for item in (event.get("evidence") or []))
+    text = f"{source} {source_type} {title} {evidence}".lower()
+    weak_source_tokens = [
+        "f10",
+        "financial_web",
+        "akshare://",
+        "新浪财务报表",
+        "财务报表",
+        "财务概况",
+        "财务分析",
+        "经营分析",
+        "资本结构",
+        "资产负债表",
+        "利润表",
+        "现金流量表",
+        "search",
+        "搜索",
+    ]
+    event_needs_primary_source = {
+        "ORDER_SIGNED",
+        "CUSTOMER_CERTIFICATION",
+        "CAPACITY_EXPANSION",
+        "CAPEX_INCREASE",
+        "POLICY_SUPPORT",
+        "TECH_UPGRADE",
+        "PRODUCT_LAUNCH",
+    }
+    return event_type in event_needs_primary_source and any(token in text for token in weak_source_tokens)
 
 
 def _dedup_issues(issues: list[ReportQualityIssue]) -> list[ReportQualityIssue]:

@@ -164,6 +164,7 @@ class TopicResearchReport:
     candidates: list[InvestmentCandidate] = field(default_factory=list)
     current_snapshot: list[str] = field(default_factory=list)
     web_financial_facts: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    six_dimension_analysis: list[dict[str, Any]] = field(default_factory=list)
     core_logic: list[str] = field(default_factory=list)
     valuation_view: list[str] = field(default_factory=list)
     sentiment_score: float = 0.0
@@ -191,6 +192,7 @@ class TopicResearchReport:
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "current_snapshot": self.current_snapshot,
             "web_financial_facts": self.web_financial_facts,
+            "six_dimension_analysis": self.six_dimension_analysis,
             "core_logic": self.core_logic,
             "valuation_view": self.valuation_view,
             "sentiment_score": self.sentiment_score,
@@ -220,6 +222,7 @@ def build_topic_research_report(
     media_crawler_platforms: list[str] | None = None,
     search_keywords: list[str] | None = None,
     query_expansion: dict[str, Any] | None = None,
+    extra_documents: list[SourceDocument] | None = None,
     enable_financial_web: bool = True,
     company_profile_source: str = "llm",
 ) -> TopicResearchReport:
@@ -246,7 +249,11 @@ def build_topic_research_report(
     expanded_terms = [term for term in (search_keywords or []) if term]
     expanded_query = " ".join([topic, *expanded_terms[:16]]).strip()
     docs, results = manager.fetch_all(FetchRequest(query=topic, keywords=expanded_terms, limit=limit))
+    if extra_documents:
+        docs = [*docs, *extra_documents]
     warnings = [*manager.errors]
+    if extra_documents:
+        warnings.append(f"Evidence-first tool documents injected before research build: {len(extra_documents)}.")
     if company_profile_source == "llm":
         if profiles:
             warnings.append(f"公司画像来源：LLM 生成 {len(profiles)} 条候选画像，未使用本地 company_map 匹配；公司身份、代码和业务节点仍需公告/财报核验。")
@@ -364,6 +371,17 @@ def build_topic_research_report(
     recommendation = _build_recommendation(candidates, signals, company_views)
     scenarios = _build_scenarios(intent, related_nodes, candidates, recommendation)
     tracking_indicators = _build_tracking_indicators(intent, related_nodes, company_views, signals)
+    six_dimension_analysis = _build_six_dimension_analysis(
+        intent=intent,
+        matched_nodes=related_nodes,
+        upstream_nodes=upstream_nodes,
+        downstream_nodes=downstream_nodes,
+        companies=company_views,
+        signals=signals,
+        docs=selected_docs,
+        sentiment_score=sentiment_score,
+        sentiment_label=sentiment_label,
+    )
 
     return TopicResearchReport(
         topic=topic,
@@ -381,6 +399,7 @@ def build_topic_research_report(
         candidates=candidates,
         current_snapshot=current_snapshot,
         web_financial_facts=web_financial_facts,
+        six_dimension_analysis=six_dimension_analysis,
         core_logic=core_logic,
         valuation_view=valuation_view,
         sentiment_score=sentiment_score,
@@ -1535,6 +1554,262 @@ def _competitive_landscape_lines(report: TopicResearchReport, primary: TopicComp
     return lines
 
 
+def _build_six_dimension_analysis(
+    *,
+    intent: ResearchIntent,
+    matched_nodes: list[str],
+    upstream_nodes: list[str],
+    downstream_nodes: list[str],
+    companies: list[TopicCompanyView],
+    signals: list[WeakSignal],
+    docs: list[SourceDocument],
+    sentiment_score: float,
+    sentiment_label: str,
+) -> list[dict[str, Any]]:
+    primary = companies[0] if companies else None
+    financial = primary.financial if primary else None
+    price = primary.price if primary else None
+    credible_signals = [signal for signal in signals if not _is_low_quality_rule_signal(signal)]
+
+    technical_evidence: list[str] = []
+    if price:
+        technical_evidence.append(_price_brief(price))
+    technical_signals = [
+        signal.title
+        for signal in credible_signals
+        if signal.event.event_type in {"ATTENTION_HOT", "PRICE_INCREASE", "PRICE_DECREASE"}
+    ][:3]
+    technical_evidence.extend(technical_signals)
+
+    funding_evidence: list[str] = []
+    if price:
+        funding_evidence.append(_price_brief(price))
+    if sentiment_label:
+        funding_evidence.append(f"市场情绪：{sentiment_label}，情绪分数 {sentiment_score:.2f}")
+
+    fundamental_evidence: list[str] = []
+    if financial:
+        fundamental_evidence.append(_financial_brief(financial))
+    fundamental_evidence.extend(
+        signal.title
+        for signal in credible_signals
+        if signal.event.event_type in {"FINANCIAL_VALIDATION", "GROSS_MARGIN_CHANGE"}
+    )
+
+    prosperity_events = {
+        "ORDER_SIGNED",
+        "CUSTOMER_CERTIFICATION",
+        "CAPACITY_EXPANSION",
+        "CAPEX_INCREASE",
+        "PRODUCT_LAUNCH",
+        "TECH_UPGRADE",
+        "PRICE_INCREASE",
+    }
+    prosperity_evidence = [signal.title for signal in credible_signals if signal.event.event_type in prosperity_events][:5]
+    if docs:
+        prosperity_evidence.extend(f"{_doc_date_text(doc)} {doc.title}" for doc in docs[:3])
+
+    policy_evidence = [
+        signal.title
+        for signal in credible_signals
+        if signal.event.event_type == "POLICY_SUPPORT" or "政策" in signal.title
+    ][:5]
+    policy_evidence.extend(
+        f"{_doc_date_text(doc)} {doc.title}"
+        for doc in docs[:5]
+        if "政策" in doc.title or "支持" in doc.title or "规划" in doc.title
+    )
+
+    chain_evidence = [
+        f"核心节点：{', '.join(matched_nodes[:8]) or '数据缺口'}",
+        f"上游节点：{', '.join(upstream_nodes[:8]) or '数据缺口'}",
+        f"下游节点：{', '.join(downstream_nodes[:8]) or '数据缺口'}",
+    ]
+    if primary:
+        chain_evidence.append(f"目标公司覆盖节点：{', '.join(primary.company.nodes[:8]) or '数据缺口'}")
+
+    return [
+        _dimension_card(
+            "技术面维度",
+            _technical_dimension_view(price, technical_signals),
+            technical_evidence,
+            [
+                "缺少真实 K 线、成交量、均线、MACD/RSI、突破/回撤区间等技术指标。",
+                "缺少相对行业指数和大盘的超额收益数据。",
+            ],
+            ["补充日线行情、成交额、换手率和相对强弱指标。"],
+        ),
+        _dimension_card(
+            "资金面维度",
+            _funding_dimension_view(price, sentiment_score, sentiment_label),
+            funding_evidence,
+            [
+                "缺少主力资金、北向资金、融资融券、机构持仓、龙虎榜和 ETF 持仓变化。",
+                "缺少成交额分位和筹码集中度数据。",
+            ],
+            ["接入东方财富/同花顺资金流、龙虎榜、两融和基金持仓数据。"],
+        ),
+        _dimension_card(
+            "基本面维度",
+            _fundamental_dimension_view(financial),
+            fundamental_evidence,
+            [
+                "缺少完整三张表、分业务收入、分地区收入、客户/供应商集中度和费用率。",
+                "缺少未来三年盈利预测和一致预期变化。",
+            ],
+            ["优先补齐收入、利润、毛利率、现金流、存货、应收、资本开支和 ROE 拆解。"],
+        ),
+        _dimension_card(
+            "产业景气度维度",
+            _prosperity_dimension_view(prosperity_evidence, sentiment_score),
+            prosperity_evidence,
+            [
+                "缺少行业价格、库存、订单、产能利用率、下游 CapEx 和景气周期位置。",
+                "新闻热度不能直接等同于行业景气，需要用量价数据验证。",
+            ],
+            ["补充行业价格、出货量、订单/排产、下游资本开支和库存周期指标。"],
+        ),
+        _dimension_card(
+            "政策维度",
+            _policy_dimension_view(policy_evidence),
+            policy_evidence,
+            [
+                "缺少直接作用于目标公司或目标环节的政策原文、补贴口径和执行时间表。",
+                "宏观政策支持不能直接等同于公司订单或利润改善。",
+            ],
+            ["补充政策原文、适用环节、受益条件、落地进度和公司公告验证。"],
+        ),
+        _dimension_card(
+            "产业链维度",
+            _chain_dimension_view(intent, matched_nodes, upstream_nodes, downstream_nodes, primary),
+            chain_evidence,
+            [
+                "产业链映射不等于真实客户/供应商关系，需要公告、财报和研报交叉验证。",
+                "缺少各环节价值量、替代难度、供给格局和瓶颈权力评分。",
+            ],
+            ["补充上游约束、下游需求、公司所处环节、替代难度、客户路径和价值分配。"],
+        ),
+    ]
+
+
+def _dimension_card(
+    name: str,
+    view: str,
+    evidence: list[str],
+    data_gaps: list[str],
+    next_actions: list[str],
+) -> dict[str, Any]:
+    return {
+        "dimension": name,
+        "view": view,
+        "evidence": list(dict.fromkeys([item for item in evidence if item]))[:8],
+        "data_gaps": data_gaps,
+        "next_actions": next_actions,
+    }
+
+
+def _is_low_quality_rule_signal(signal: WeakSignal) -> bool:
+    event_type = str(signal.event.event_type or "").upper()
+    source = str(signal.event.source or "")
+    source_type = str(signal.event.source_type or "")
+    title = str(signal.title or "")
+    evidence = " ".join(str(item) for item in (signal.event.evidence or []))
+    text = f"{source} {source_type} {title} {evidence}".lower()
+
+    weak_source_tokens = [
+        "f10",
+        "financial_web",
+        "akshare://",
+        "新浪财务报表",
+        "财务报表",
+        "财务概况",
+        "财务分析",
+        "经营分析",
+        "资本结构",
+        "资产负债表",
+        "利润表",
+        "现金流量表",
+        "search",
+        "搜索",
+    ]
+    event_needs_primary_source = {
+        "ORDER_SIGNED",
+        "CUSTOMER_CERTIFICATION",
+        "CAPACITY_EXPANSION",
+        "CAPEX_INCREASE",
+        "POLICY_SUPPORT",
+        "TECH_UPGRADE",
+        "PRODUCT_LAUNCH",
+    }
+    return event_type in event_needs_primary_source and any(token in text for token in weak_source_tokens)
+
+
+def _technical_dimension_view(price: PriceSnapshot | None, technical_signals: list[str]) -> str:
+    if price and any(value is not None for value in [price.change_1m, price.change_3m, price.change_6m, price.change_12m]):
+        return f"已有阶段涨跌幅线索：{_price_brief(price)}；但仍缺少成交量、均线和形态确认。"
+    if technical_signals:
+        return "已有价格/热度相关事件线索，但不能替代完整技术面判断。"
+    return "技术面数据不足，当前不能判断趋势突破、量价配合或超买超卖状态。"
+
+
+def _funding_dimension_view(price: PriceSnapshot | None, sentiment_score: float, sentiment_label: str) -> str:
+    if price:
+        return f"行情快照可辅助观察资金偏好，当前情绪为{sentiment_label}；但缺少真实资金流向数据。"
+    if sentiment_score:
+        return f"仅有情绪分数 {sentiment_score:.2f}，不能替代主力资金、北向资金和成交额验证。"
+    return "资金面数据不足，无法判断资金是否正在主动增配。"
+
+
+def _fundamental_dimension_view(financial: FinancialSnapshot | None) -> str:
+    if financial:
+        return f"已有财务快照：{_financial_brief(financial)}；需进一步回到财报核验收入质量和现金流。"
+    return "基本面缺少结构化财务数据，当前只能用新闻、公告和产业链位置形成待验证假设。"
+
+
+def _prosperity_dimension_view(evidence: list[str], sentiment_score: float) -> str:
+    if evidence:
+        return "已有行业事件/新闻线索，可用于判断景气方向，但还需要量价、订单和库存数据确认。"
+    if sentiment_score > 0.6:
+        return "情绪偏乐观，但缺少行业真实景气指标验证。"
+    return "产业景气度证据不足，暂不能判断行业处于上行、下行还是底部修复。"
+
+
+def _policy_dimension_view(evidence: list[str]) -> str:
+    if evidence:
+        return "已有政策相关线索，但需确认政策是否直接作用于目标公司或产业链关键环节。"
+    return "政策维度缺少直接证据，不能把泛政策支持写成公司确定性利好。"
+
+
+def _chain_dimension_view(
+    intent: ResearchIntent,
+    matched_nodes: list[str],
+    upstream_nodes: list[str],
+    downstream_nodes: list[str],
+    primary: TopicCompanyView | None,
+) -> str:
+    if matched_nodes or upstream_nodes or downstream_nodes:
+        target = primary.company.name if primary else intent.target
+        return f"已形成 {target} 的产业链节点映射，可用于识别上下游传导和瓶颈环节；仍需验证真实客户/供应商关系。"
+    return "产业链节点映射不足，需要先识别核心材料、零部件、设备、工艺和应用场景。"
+
+
+def _six_dimension_lines(report: TopicResearchReport) -> list[str]:
+    if not report.six_dimension_analysis:
+        return ["数据缺口：当前尚未生成六维分析。"]
+    lines = [
+        "| 维度 | 当前判断 | 证据线索 | 数据缺口 | 下一步验证 |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for item in report.six_dimension_analysis:
+        evidence = "；".join(str(x) for x in (item.get("evidence") or [])[:3]) or "暂无"
+        gaps = "；".join(str(x) for x in (item.get("data_gaps") or [])[:2]) or "暂无"
+        actions = "；".join(str(x) for x in (item.get("next_actions") or [])[:2]) or "暂无"
+        lines.append(
+            f"| {item.get('dimension')} | {item.get('view')} | {evidence} | {gaps} | {actions} |"
+        )
+    return lines
+
+
 def _valuation_analysis_lines(report: TopicResearchReport, primary: TopicCompanyView | None) -> list[str]:
     return [
         "本版暂不输出估值分析。",
@@ -2443,20 +2718,26 @@ def render_professional_topic_report(report: TopicResearchReport) -> str:
         "",
         _render_executive_summary(report),
         "",
-        "## 二、近期热点新闻与公告",
+        "## 二、投资六维分析",
         "",
     ]
+    lines.extend(_six_dimension_lines(report))
+    lines.extend([
+        "",
+        "## 三、近期热点新闻与公告",
+        "",
+    ])
     for item in _hot_news_items(report):
         lines.append(f"- {item}")
 
-    lines.extend(["", "## 三、产业链逻辑", ""])
+    lines.extend(["", "## 四、产业链逻辑", ""])
     for item in report.core_logic:
         lines.append(f"- {item}")
     lines.append(f"- 核心节点：{', '.join(report.matched_nodes) or '-'}")
     lines.append(f"- 上游节点：{', '.join(report.upstream_nodes) or '-'}")
     lines.append(f"- 下游节点：{', '.join(report.downstream_nodes) or '-'}")
 
-    lines.extend(["", "## 四、重点公司详表", ""])
+    lines.extend(["", "## 五、重点公司详表", ""])
     if not report.companies:
         lines.append("- 当前未匹配到重点公司。")
     for idx, row in enumerate(report.companies[:10], 1):
@@ -2481,11 +2762,11 @@ def render_professional_topic_report(report: TopicResearchReport) -> str:
             lines.append("- 最近财报/公告材料：暂未抓取到。")
         lines.append("")
 
-    lines.extend(["## 五、财务与估值观察", ""])
+    lines.extend(["## 六、财务与估值观察", ""])
     for item in report.valuation_view:
         lines.append(f"- {item}")
 
-    lines.extend(["", "## 六、市场情绪与事件信号", ""])
+    lines.extend(["", "## 七、市场情绪与事件信号", ""])
     lines.append(f"- 情绪分数：{report.sentiment_score:.2f}")
     lines.append(f"- 情绪标签：{report.sentiment_label}")
     if report.signals:
@@ -2496,7 +2777,7 @@ def render_professional_topic_report(report: TopicResearchReport) -> str:
     else:
         lines.append("- 当前缺少足够强的结构化事件信号。")
 
-    lines.extend(["", "## 七、情景分析", ""])
+    lines.extend(["", "## 八、情景分析", ""])
     for scenario in report.scenarios:
         lines.append(f"### {scenario.horizon}")
         lines.append(f"- 乐观：{scenario.optimistic}")
@@ -2504,17 +2785,17 @@ def render_professional_topic_report(report: TopicResearchReport) -> str:
         lines.append(f"- 悲观：{scenario.pessimistic}")
         lines.append("")
 
-    lines.extend(["## 八、跟踪指标", ""])
+    lines.extend(["## 九、跟踪指标", ""])
     for item in report.tracking_indicators:
         lines.append(f"- {item}")
 
-    lines.extend(["", "## 九、主要风险", ""])
+    lines.extend(["", "## 十、主要风险", ""])
     for item in _collect_report_risks(report):
         lines.append(f"- {item}")
 
     lines.extend([
         "",
-        "## 十、结论",
+        "## 十一、结论",
         "",
         _render_conclusion(report),
         "",

@@ -182,9 +182,80 @@ function renderThinking(message) {
           .map((step, index) => `<span class="${index < activeIndex ? "done" : index === activeIndex ? "active" : ""}">${escapeHtml(step)}</span>`)
           .join("")}
       </div>
+      ${renderTimeline(message)}
+      ${renderLiveReport(message)}
       ${renderStream(message)}
     </div>
   `;
+}
+
+function renderLiveReport(message) {
+  const text = String(message.liveOutput || "").trim();
+  if (!text) return "";
+  return `
+    <div class="live-report">
+      <div class="live-report-head">
+        <strong>模型实时输出</strong>
+        <span>正在生成报告正文</span>
+      </div>
+      <pre>${escapeHtml(text)}</pre>
+    </div>
+  `;
+}
+
+function renderTimeline(message) {
+  const events = (message.timeline || []).slice(-12);
+  if (!events.length) return "";
+  return `
+    <div class="live-timeline">
+      <div class="live-timeline-head">
+        <strong>实时研究过程</strong>
+        <span>展示模型决策、检索网站和阶段性输出</span>
+      </div>
+      ${events.map((event) => `
+        <div class="live-event ${escapeAttr(event.type || "event")}">
+          <div class="live-event-main">
+            <span class="event-type">${eventTypeLabel(event.type)}</span>
+            <strong>${escapeHtml(event.title || "运行事件")}</strong>
+            ${event.ts ? `<time>${escapeHtml(event.ts)}</time>` : ""}
+          </div>
+          ${event.message ? `<p>${escapeHtml(event.message)}</p>` : ""}
+          ${event.sites?.length ? `
+            <div class="site-chips">
+              ${event.sites.map((site) => `<span>${escapeHtml(site)}</span>`).join("")}
+            </div>
+          ` : ""}
+          ${renderEventDocuments(event)}
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderEventDocuments(event) {
+  const docs = event.data?.documents || [];
+  if (!docs.length) return "";
+  return `
+    <div class="event-docs">
+      ${docs.slice(0, 3).map((doc) => `
+        <div class="event-doc">
+          <span>${escapeHtml(doc.source || doc.source_type || "source")}</span>
+          ${doc.url ? `<a href="${escapeAttr(doc.url)}" target="_blank" rel="noreferrer">${escapeHtml(doc.title || doc.url)}</a>` : `<strong>${escapeHtml(doc.title || "证据")}</strong>`}
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function eventTypeLabel(type) {
+  if (type === "tool_plan") return "决策";
+  if (type === "tool_result") return "检索";
+  if (type === "tool_judge") return "判断";
+  if (type === "model_output") return "模型";
+  if (type === "crawler") return "爬取";
+  if (type === "artifact") return "产物";
+  if (type === "stage") return "阶段";
+  return "事件";
 }
 
 function renderStream(message) {
@@ -379,6 +450,8 @@ function streamRunUntilDone(runId, messageId) {
       current.stage = runInfo.stage || "运行中";
       current.logTail = runInfo.log_tail || "";
       current.streamLines = streamLinesFromLog(current.logTail);
+      current.timeline = runInfo.timeline || [];
+      current.liveOutput = runInfo.live_output || "";
 
       if (runInfo.status === "completed") {
         settled = true;
@@ -438,6 +511,8 @@ async function pollRunUntilDone(runId, messageId) {
       message.stage = runInfo.stage || "运行中";
       message.logTail = runInfo.log_tail || "";
       message.streamLines = streamLinesFromLog(message.logTail);
+      message.timeline = runInfo.timeline || [];
+      message.liveOutput = runInfo.live_output || "";
       saveConversations();
 
       if (runInfo.status === "completed") {

@@ -23,7 +23,13 @@ def build_professional_evidence_pack(
     company = primary.get("company") or {}
     financial = primary.get("financial")
     price = primary.get("price")
-    docs = _dedup_docs([*(report.get("selected_documents") or []), *(report.get("recent_documents") or [])])[:max_docs]
+    docs = _dedup_docs(
+        [
+            *(report.get("selected_documents") or []),
+            *(report.get("recent_documents") or []),
+            *_tool_research_docs(report),
+        ]
+    )[:max_docs]
     a_share_docs = primary.get("a_share_reports") or []
     a_share_summaries = [
         summarize_financial_report_document(doc)
@@ -46,6 +52,14 @@ def build_professional_evidence_pack(
 
     query_expansion = report.get("query_expansion") or {}
     topic_class = query_expansion.get("topic_class") or "unknown"
+    raw_signals = report.get("signals") or []
+    usable_signals = [sig for sig in raw_signals if not _is_low_quality_signal(sig)]
+    dropped_signal_count = len(raw_signals) - len(usable_signals)
+    if dropped_signal_count > 0:
+        warnings.append(
+            f"已剔除 {dropped_signal_count} 条低置信度规则信号；这些信号多来自F10/财务网页/搜索页，"
+            "不得当作订单、政策、扩产或客户认证事实。"
+        )
     return {
         "topic": report.get("topic"),
         "generated_at": report.get("generated_at"),
@@ -78,9 +92,12 @@ def build_professional_evidence_pack(
         "price_snapshot": _snapshot_pack(price),
         "financial_report_summaries": _trim_deep(financial_summaries[:max_a_share_reports + 8]),
         "broker_report_summaries": _trim_deep(broker_summaries[:8]),
+        "six_dimension_analysis": _trim_deep(report.get("six_dimension_analysis") or []),
         "valuation_view": report.get("valuation_view") or [],
         "news_evidence": [_doc_pack(doc) for doc in docs],
-        "signals": [_signal_pack(sig) for sig in (report.get("signals") or [])[:max_signals]],
+        "tool_research_summary": _tool_research_summary(report),
+        "signals": [_signal_pack(sig) for sig in usable_signals[:max_signals]],
+        "filtered_signal_count": dropped_signal_count,
         "sentiment": {
             "score": report.get("sentiment_score"),
             "label": report.get("sentiment_label"),
@@ -147,6 +164,48 @@ def _doc_pack(doc: dict[str, Any]) -> dict[str, Any]:
             "platform": (doc.get("metadata") or {}).get("platform"),
             "file": (doc.get("metadata") or {}).get("file"),
         },
+    }
+
+
+def _tool_research_docs(report: dict[str, Any]) -> list[dict[str, Any]]:
+    tool_research = report.get("tool_research") or {}
+    docs: list[dict[str, Any]] = []
+    for item in tool_research.get("evidence") or []:
+        if not isinstance(item, dict):
+            continue
+        docs.append(
+            {
+                "title": item.get("title") or "LangGraph工具检索证据",
+                "source": item.get("source") or "langgraph_tool_agent",
+                "source_type": item.get("source_type") or "tool_research",
+                "published_at": item.get("published_at"),
+                "url": item.get("url"),
+                "path": item.get("path"),
+                "content": item.get("content_excerpt") or item.get("content") or "",
+                "metadata": {"platform": "langgraph_tool_agent", "record": item},
+            }
+        )
+    return docs
+
+
+def _tool_research_summary(report: dict[str, Any]) -> dict[str, Any]:
+    tool_research = report.get("tool_research") or {}
+    if not tool_research:
+        return {}
+    return {
+        "framework": tool_research.get("framework"),
+        "steps": [
+            {
+                "action": step.get("action"),
+                "query": step.get("query"),
+                "documents_found": step.get("documents_found"),
+                "warning": step.get("warning"),
+            }
+            for step in (tool_research.get("steps") or [])[:8]
+            if isinstance(step, dict)
+        ],
+        "evidence_count": len(tool_research.get("evidence") or []),
+        "warnings": tool_research.get("warnings") or [],
     }
 
 
@@ -243,6 +302,47 @@ def _signal_pack(signal: dict[str, Any]) -> dict[str, Any]:
         "causal_path": hypothesis.get("causal_path") or [],
         "risks": signal.get("risks") or [],
     }
+
+
+def _is_low_quality_signal(signal: dict[str, Any]) -> bool:
+    event = signal.get("event") or {}
+    event_type = str(event.get("event_type") or signal.get("event_type") or "").upper()
+    source = str(event.get("source") or signal.get("source") or "")
+    source_type = str(event.get("source_type") or signal.get("source_type") or "")
+    title = str(signal.get("title") or event.get("description") or "")
+    evidence = " ".join(str(item) for item in (event.get("evidence") or []))
+    text = f"{source} {source_type} {title} {evidence}".lower()
+
+    weak_source_tokens = [
+        "f10",
+        "financial_web",
+        "akshare://",
+        "新浪财务报表",
+        "财务报表",
+        "财务概况",
+        "财务分析",
+        "经营分析",
+        "资本结构",
+        "资产负债表",
+        "利润表",
+        "现金流量表",
+        "search",
+        "搜索",
+    ]
+    event_needs_primary_source = {
+        "ORDER_SIGNED",
+        "CUSTOMER_CERTIFICATION",
+        "CAPACITY_EXPANSION",
+        "CAPEX_INCREASE",
+        "POLICY_SUPPORT",
+        "TECH_UPGRADE",
+        "PRODUCT_LAUNCH",
+    }
+    if event_type in event_needs_primary_source and any(token in text for token in weak_source_tokens):
+        return True
+    if not title.strip():
+        return True
+    return False
 
 
 def _mandatory_data_gaps(

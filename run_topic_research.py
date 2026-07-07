@@ -47,7 +47,10 @@ from chainalpha.investment.topic_report import (
     render_professional_topic_report,
     render_topic_research_markdown,
 )
+from chainalpha.investment.tool_research_agent import LangGraphResearchAgent
 from chainalpha.config import load_settings
+from chainalpha.connectors.base import SourceDocument, build_source_document
+from chainalpha.nlp.llm_client import llm_stream_events
 from chainalpha.reports.html_renderer import render_markdown_html
 
 
@@ -139,6 +142,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--skip-report-check", action="store_true", help="Disable final report quality/check-and-supplement agent.")
     parser.add_argument("--skip-report-check-web", action="store_true", help="Run report quality checks without supplemental web search.")
+    parser.add_argument("--report-check-web", dest="skip_report_check_web", action="store_false", help="Allow report quality checks to run supplemental web search.")
+    parser.set_defaults(skip_report_check_web=True)
+    parser.add_argument("--skip-tool-agent", action="store_true", help="Disable LangGraph tool-use evidence search inside the normal report flow.")
+    parser.add_argument("--skip-tool-agent-web", action="store_true", help="Disable public web search inside the LangGraph tool-use evidence agent.")
+    parser.add_argument("--tool-agent-iterations", type=int, default=3, help="Maximum LangGraph tool-use evidence search iterations.")
+    parser.add_argument("--tool-agent-top-k", type=int, default=6, help="Maximum documents per LangGraph tool call.")
     parser.add_argument("--broker-name", default="", help="Optional broker/institution name shown at the top of generated HTML reports.")
     parser.add_argument("--broker-logo", default="", help="Optional broker/institution logo path or URL shown at the top of generated HTML reports.")
     return parser.parse_args()
@@ -257,17 +266,40 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
     _apply_research_type_override(args, query_expansion)
     query_expansion_path = out_dir / "query_expansion.json"
     query_expansion_path.write_text(json.dumps(query_expansion.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    _emit_run_event(
+        out_dir,
+        "stage",
+        "查询理解完成",
+        f"{query_expansion.corrected_query} | {', '.join(query_expansion.search_keywords[:8])}",
+        {
+            "research_type": _effective_research_type(args, query_expansion),
+            "topic_class": query_expansion.topic_class,
+            "keywords": query_expansion.search_keywords[:16],
+        },
+    )
     print(f"Query expansion: {query_expansion.corrected_query} | {', '.join(query_expansion.search_keywords[:12])}", flush=True)
     print(f"Research type: {_effective_research_type(args, query_expansion)} | topic_class={query_expansion.topic_class}", flush=True)
     print(f"Query expansion JSON: {query_expansion_path}", flush=True)
 
+    refresh_result = None
     if not args.skip_refresh_news:
+        _emit_run_event(out_dir, "stage", "MediaCrawler 刷新", "正在按关键词刷新本地新闻库")
         refresh_result = refresh_mediacrawler_news(args, out_dir, media_data_root, query_expansion)
         if refresh_result:
             metadata_path = out_dir / "media_crawler_refresh.json"
             metadata_path.write_text(json.dumps(refresh_result, ensure_ascii=False, indent=2), encoding="utf-8")
+            _emit_run_event(
+                out_dir,
+                "crawler",
+                "MediaCrawler 刷新完成",
+                f"ok={refresh_result.get('ok')} keywords={', '.join((refresh_result.get('keywords') or [])[:8])}",
+                {"refresh": _trim_event_data(refresh_result, max_text=1200)},
+            )
             print(f"MediaCrawler refresh metadata: {metadata_path}", flush=True)
 
+    evidence_context = _build_evidence_context(args, out_dir, media_data_root, query_expansion, refresh_result)
+
+    _emit_run_event(out_dir, "stage", "研究底稿构建", "正在基于统一证据层生成 topic_research.json")
     report = build_topic_research_report(
         topic=args.topic,
         config=args.config,
@@ -284,12 +316,21 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
         media_crawler_platforms=[item.strip() for item in args.media_crawler_platforms.split(",") if item.strip()],
         search_keywords=query_expansion.search_keywords,
         query_expansion=query_expansion.to_dict(),
+        extra_documents=evidence_context["extra_documents"],
         enable_financial_web=not args.skip_financial_web,
         company_profile_source=args.company_profile_source,
     )
 
+    report_data = _attach_evidence_store(report.to_dict(), evidence_context["store"])
     report_json = out_dir / "topic_research.json"
-    report_json.write_text(json.dumps(report.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    report_json.write_text(json.dumps(report_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _emit_run_event(
+        out_dir,
+        "artifact",
+        "研究底稿完成",
+        f"documents={len(report_data.get('selected_documents') or [])}, signals={len(report_data.get('signals') or [])}",
+        {"artifact": "topic_research.json"},
+    )
     if args.output_mode == "full":
         report_md = out_dir / "topic_research.md"
         report_html = out_dir / "topic_research.html"
@@ -316,7 +357,7 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
 
     chain_report_data: dict | None = None
     if args.chain_bottleneck_report:
-        chain_report = build_chain_bottleneck_report(report.to_dict())
+        chain_report = build_chain_bottleneck_report(report_data)
         chain_report_data = chain_report.to_dict()
         if args.output_mode == "full":
             chain_json = out_dir / "chain_bottleneck_report.json"
@@ -330,10 +371,10 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
             print(f"Chain Bottleneck Markdown: {chain_md}")
             print(f"Chain Bottleneck HTML: {chain_html}")
 
-    agent_report = build_five_agent_research_report(report.to_dict(), chain_report_data)
+    agent_report = build_five_agent_research_report(report_data, chain_report_data)
     chain_visual_markdown = ""
     if args.chain_visual and _effective_research_type(args, query_expansion) == "industry-chain":
-        visual_data = build_chain_visual_data(report.to_dict(), agent_report.to_dict())
+        visual_data = build_chain_visual_data(report_data, agent_report.to_dict())
         visual_paths = save_chain_visual_outputs(visual_data, out_dir)
         chain_visual_markdown = render_chain_visual_markdown(visual_paths["svg"]) + "\n"
         print(f"Chain Visual JSON: {visual_paths['json']}")
@@ -354,12 +395,13 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
         print(f"Five-Agent HTML: {agent_report_html}")
 
     if args.llm_summary:
+        _emit_run_event(out_dir, "stage", "LLM 报告生成", "正在把证据包交给大模型生成最终报告")
         if args.chain_bottleneck_report and chain_report_data:
             if is_definition_question(args.topic):
                 _write_chain_explainer_llm_outputs(
                     args,
                     out_dir,
-                    report.to_dict(),
+                    report_data,
                     agent_report.to_dict(),
                     lead_markdown=chain_visual_markdown,
                 )
@@ -369,6 +411,7 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
                     out_dir,
                     chain_report_data,
                     agent_report.to_dict(),
+                    source_report_data=report_data,
                     lead_markdown=chain_visual_markdown,
                 )
             print(
@@ -377,26 +420,28 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
                 flush=True,
             )
         else:
-            _write_llm_outputs(args, out_dir, report.to_dict(), lead_markdown=chain_visual_markdown)
+            _write_llm_outputs(args, out_dir, report_data, lead_markdown=chain_visual_markdown)
     elif args.output_mode == "final":
         final_md = out_dir / "final_report.md"
         final_html = out_dir / "final_report.html"
+        _emit_run_event(out_dir, "stage", "确定性报告生成", "正在生成 final_report.md/html")
         if args.chain_bottleneck_report and chain_report_data and is_definition_question(args.topic):
-            final_markdown = render_chain_explainer_markdown(report.to_dict())
-            quality_report_data = {**report.to_dict(), "_report_kind": "chain_explainer"}
+            final_markdown = render_chain_explainer_markdown(report_data)
+            quality_report_data = {**report_data, "_report_kind": "chain_explainer"}
         elif args.chain_bottleneck_report and chain_report_data:
             final_markdown = render_chain_bottleneck_markdown(chain_report)
-            quality_report_data = report.to_dict()
+            quality_report_data = report_data
         elif _effective_research_type(args, query_expansion) == "industry-chain":
             final_markdown = render_five_agent_markdown(agent_report)
-            quality_report_data = report.to_dict()
+            quality_report_data = report_data
         else:
             final_markdown = render_professional_topic_report(report)
-            quality_report_data = report.to_dict()
+            quality_report_data = report_data
         final_markdown = _prepend_lead_markdown(chain_visual_markdown, final_markdown)
         final_markdown = _apply_report_quality_agent(args, out_dir, final_markdown, quality_report_data)
         final_md.write_text(final_markdown, encoding="utf-8")
         final_html.write_text(_render_html(args, final_markdown, title=f"{args.topic} Final Report"), encoding="utf-8")
+        _emit_run_event(out_dir, "model_output", "最终报告已生成", final_markdown[:900], {"artifact": "final_report.md"})
         print(f"Final Markdown: {final_md}")
         print(f"Final HTML: {final_html}")
 
@@ -408,6 +453,286 @@ def resolve_media_crawler_data_root(path: Path | None) -> Path:
     if p.name == "data":
         return p
     return p / "data"
+
+
+def _build_evidence_context(
+    args: argparse.Namespace,
+    out_dir: Path,
+    media_data_root: Path,
+    query_expansion: QueryExpansion,
+    refresh_result: dict | None,
+) -> dict:
+    """Build the evidence layer before deterministic research construction."""
+
+    tool_result = None
+    tool_warning = ""
+    extra_documents: list[SourceDocument] = []
+    if not args.skip_tool_agent:
+        try:
+            settings = load_settings()
+            agent = LangGraphResearchAgent(
+                settings,
+                media_crawler_root=media_data_root,
+                enable_local_search=True,
+                enable_web_search=not args.skip_tool_agent_web,
+                top_k=args.tool_agent_top_k,
+                max_iterations=args.tool_agent_iterations,
+                progress_callback=lambda event: _emit_run_event(
+                    out_dir,
+                    str(event.get("type") or "tool"),
+                    str(event.get("title") or "工具检索"),
+                    str(event.get("message") or ""),
+                    {key: value for key, value in event.items() if key not in {"type", "title", "message"}},
+                ),
+            )
+            _emit_run_event(out_dir, "stage", "工具检索 Agent", "正在补充本地和网页证据")
+            tool_result_obj = agent.run(_prebuild_tool_agent_question(args, query_expansion))
+            tool_result = tool_result_obj.to_dict()
+            extra_documents = _tool_result_to_documents(tool_result)
+            tool_path = out_dir / "tool_research_agent.json"
+            tool_path.write_text(json.dumps(tool_result, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(
+                f"LangGraph Tool Agent: framework={tool_result_obj.framework}, "
+                f"steps={len(tool_result_obj.steps)}, evidence={len(tool_result_obj.evidence)}, "
+                f"injected_docs={len(extra_documents)}",
+                flush=True,
+            )
+            print(f"LangGraph Tool Agent JSON: {tool_path}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            tool_warning = f"LangGraph tool research failed before research build: {type(exc).__name__}: {exc}"
+            print(tool_warning, flush=True)
+
+    evidence_store = {
+        "schema_version": "evidence_store.v1",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "topic": args.topic,
+        "research_type": _effective_research_type(args, query_expansion),
+        "query_expansion": query_expansion.to_dict(),
+        "media_crawler": {
+            "data_root": str(media_data_root),
+            "refresh": refresh_result,
+        },
+        "tool_research": tool_result or {},
+        "tool_research_warning": tool_warning,
+        "builder_inputs": {
+            "extra_document_count": len(extra_documents),
+            "extra_document_ids": [doc.id for doc in extra_documents],
+        },
+        "policy": {
+            "tool_agent_runs_before_research_build": True,
+            "report_quality_agent_default_web_search": False,
+            "single_source_for_llm_and_quality": True,
+        },
+    }
+    evidence_path = out_dir / "evidence_store.json"
+    evidence_path.write_text(json.dumps(evidence_store, ensure_ascii=False, indent=2), encoding="utf-8")
+    _emit_run_event(
+        out_dir,
+        "artifact",
+        "统一证据层完成",
+        f"extra_documents={len(extra_documents)}, tool_evidence={len((tool_result or {}).get('evidence') or [])}",
+        {"artifact": "evidence_store.json"},
+    )
+    print(f"Evidence Store JSON: {evidence_path}", flush=True)
+    return {"store": evidence_store, "extra_documents": extra_documents}
+
+
+def _prebuild_tool_agent_question(args: argparse.Namespace, query_expansion: QueryExpansion) -> str:
+    research_type = _effective_research_type(args, query_expansion)
+    corrected = query_expansion.corrected_query or args.topic
+    keywords = ", ".join(query_expansion.search_keywords[:12])
+    crawl_keywords = ", ".join(query_expansion.crawl_keywords[:12])
+    if research_type == "industry-chain":
+        return (
+            f"Research question: {corrected}\n"
+            f"Type: industry-chain.\n"
+            f"Search keywords: {keywords}\n"
+            f"Crawl keywords: {crawl_keywords}\n"
+            "Collect only evidence useful for an upstream-to-downstream industry-chain report: "
+            "core materials/components, bottleneck links, capacity constraints, value transfer, "
+            "representative companies, policy, price/supply-demand signals, risks, and falsification indicators. "
+            "Prefer local MediaCrawler evidence first, then public finance web pages if local evidence is insufficient."
+        )
+    return (
+        f"Research question: {corrected}\n"
+        f"Type: company.\n"
+        f"Search keywords: {keywords}\n"
+        f"Crawl keywords: {crawl_keywords}\n"
+        "Collect only evidence useful for a company research report: recent news, announcements, financial metrics, "
+        "valuation metrics, stock performance, fund flow, institutional holdings, catalysts, risks, and falsification indicators. "
+        "Prefer local MediaCrawler evidence first, then public finance web pages if local evidence is insufficient."
+    )
+
+
+def _tool_result_to_documents(tool_result: dict) -> list[SourceDocument]:
+    docs: list[SourceDocument] = []
+    seen: set[str] = set()
+    for item in tool_result.get("evidence") or []:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "Tool research evidence").strip()
+        content = str(item.get("content_excerpt") or item.get("content") or "").strip()
+        url = item.get("url")
+        path = item.get("path")
+        key = str(url or path or title)
+        if not content or key in seen:
+            continue
+        seen.add(key)
+        docs.append(
+            build_source_document(
+                source=str(item.get("source") or "langgraph_tool_agent"),
+                source_type=str(item.get("source_type") or "tool_research"),
+                title=title,
+                content=content,
+                url=str(url) if url else None,
+                path=str(path) if path else None,
+                metadata={
+                    "platform": "langgraph_tool_agent",
+                    "record": item,
+                    "evidence_store": True,
+                },
+            )
+        )
+    return docs
+
+
+def _attach_evidence_store(report_data: dict, evidence_store: dict) -> dict:
+    tool_research = evidence_store.get("tool_research") or {}
+    attached = {
+        **report_data,
+        "evidence_store": evidence_store,
+        "tool_research": tool_research,
+    }
+    warning = evidence_store.get("tool_research_warning")
+    if warning:
+        attached["tool_research_warning"] = warning
+    return attached
+
+
+def _emit_run_event(
+    out_dir: Path,
+    event_type: str,
+    title: str,
+    message: str = "",
+    data: dict | None = None,
+) -> None:
+    event = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "type": event_type,
+        "title": title,
+        "message": str(message or "")[:2000],
+        "data": _trim_event_data(data or {}),
+    }
+    try:
+        with (out_dir / "run_events.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _llm_stream_event_writer(out_dir: Path, *, phase: str):
+    def write(event: dict) -> None:
+        event_type = str(event.get("type") or "")
+        if event_type == "model_delta":
+            _emit_run_event(
+                out_dir,
+                "model_delta",
+                "模型正在输出",
+                str(event.get("message") or ""),
+                {"phase": phase},
+            )
+            return
+        if event_type == "model_stream_start":
+            _emit_run_event(out_dir, "model_stream", "模型开始输出", str(event.get("message") or ""), {"phase": phase})
+            return
+        if event_type == "model_stream_end":
+            _emit_run_event(out_dir, "model_stream", "模型输出完成", str(event.get("message") or ""), {"phase": phase})
+            return
+        if event_type == "model_stream_warning":
+            _emit_run_event(out_dir, "model_stream_warning", "模型流式输出降级", str(event.get("message") or ""), {"phase": phase})
+
+    return write
+
+
+def _trim_event_data(value, *, max_text: int = 800):
+    if isinstance(value, str):
+        return value[:max_text]
+    if isinstance(value, list):
+        return [_trim_event_data(item, max_text=max_text) for item in value[:10]]
+    if isinstance(value, dict):
+        return {str(key): _trim_event_data(item, max_text=max_text) for key, item in list(value.items())[:20]}
+    return value
+
+
+def _augment_report_with_tool_agent(
+    args: argparse.Namespace,
+    out_dir: Path,
+    report_data: dict,
+    media_data_root: Path,
+) -> dict:
+    """Run the LangGraph tool-use research loop inside the normal report flow."""
+
+    if args.skip_tool_agent:
+        return report_data
+    if args.daily_scan:
+        return report_data
+
+    question = _tool_agent_question(args, report_data)
+    try:
+        settings = load_settings()
+        agent = LangGraphResearchAgent(
+            settings,
+            media_crawler_root=media_data_root,
+            enable_local_search=True,
+            enable_web_search=not args.skip_tool_agent_web,
+            top_k=args.tool_agent_top_k,
+            max_iterations=args.tool_agent_iterations,
+        )
+        result = agent.run(question)
+    except Exception as exc:  # noqa: BLE001
+        warning = f"LangGraph tool research failed: {type(exc).__name__}: {exc}"
+        print(warning, flush=True)
+        return {**report_data, "tool_research_warning": warning}
+
+    result_dict = result.to_dict()
+    tool_path = out_dir / "tool_research_agent.json"
+    tool_path.write_text(json.dumps(result_dict, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(
+        f"LangGraph Tool Agent: framework={result.framework}, "
+        f"steps={len(result.steps)}, evidence={len(result.evidence)}",
+        flush=True,
+    )
+    print(f"LangGraph Tool Agent JSON: {tool_path}", flush=True)
+    return {
+        **report_data,
+        "tool_research": result_dict,
+    }
+
+
+def _tool_agent_question(args: argparse.Namespace, report_data: dict) -> str:
+    topic = str(report_data.get("topic") or args.topic)
+    companies = report_data.get("companies") or []
+    company = {}
+    if companies and isinstance(companies[0], dict):
+        company = companies[0].get("company") or {}
+    target = company.get("name") or (report_data.get("intent") or {}).get("target") or topic
+    research_type = args.research_type
+    if research_type == "auto":
+        query_expansion = report_data.get("query_expansion") or {}
+        if query_expansion.get("topic_class") in {"raw_material_chain", "component_chain", "industry_chain"}:
+            research_type = "industry-chain"
+        else:
+            research_type = "company"
+    if research_type == "industry-chain":
+        return (
+            f"围绕“{topic}”补充产业链投研证据：上游原料、关键部件、产能约束、价格/供需、"
+            "代表公司、政策、风险和证伪条件。优先查本地新闻库，不足时查公开财经网页。"
+        )
+    return (
+        f"围绕“{target}”补充公司投研证据：近期新闻、公告、财报、PE/PB/PS、历史估值、"
+        "股价区间表现、主力资金、北向资金、两融、机构持仓、风险和证伪条件。"
+        "优先查本地新闻库，不足时查公开财经网页。"
+    )
 
 
 def _apply_research_type_override(args: argparse.Namespace, query_expansion: QueryExpansion) -> None:
@@ -738,7 +1063,8 @@ def _write_llm_outputs(
             local_financial_summaries=financial_summaries,
             broker_report_summaries=broker_summaries,
         )
-        chunked_result = generate_chunked_professional_topic_report(professional_payload)
+        with llm_stream_events(_llm_stream_event_writer(out_dir, phase="professional_report")):
+            chunked_result = generate_chunked_professional_topic_report(professional_payload)
         professional_markdown = _prepend_lead_markdown(lead_markdown, chunked_result["markdown"])
         llm_professional_markdown = _apply_report_quality_agent(
             args,
@@ -752,6 +1078,13 @@ def _write_llm_outputs(
         reply_report_html.write_text(
             _render_html(args, llm_professional_markdown, title=f"{args.topic} Final Report" if final_mode else f"{args.topic} LLM Professional Report"),
             encoding="utf-8",
+        )
+        _emit_run_event(
+            out_dir,
+            "model_output",
+            "LLM 最终报告已生成",
+            llm_professional_markdown[:900],
+            {"artifact": reply_report_md.name, "chunks": len(chunked_result.get("chunk_notes") or [])},
         )
     except Exception as exc:
         print(f"LLM professional report failed: {type(exc).__name__}: {exc}")
@@ -779,6 +1112,7 @@ def _write_chain_bottleneck_llm_outputs(
     chain_report_data: dict,
     agent_report_data: dict | None = None,
     *,
+    source_report_data: dict | None = None,
     lead_markdown: str = "",
 ) -> None:
     llm_chain_md = out_dir / "llm_chain_bottleneck_report.md"
@@ -824,16 +1158,19 @@ def _write_chain_bottleneck_llm_outputs(
             warnings=chain_report_data.get("warnings") or [],
         )
         report_data = {
+            **(source_report_data or {}),
             "topic": chain_report.topic,
             "companies": [{"company": chain_report.target_company}],
             "chain_bottleneck_report": chain_report_data,
             "five_agent_report": agent_report_data or {},
         }
-        markdown = generate_llm_chain_bottleneck_report(chain_report, agent_report=agent_report_data)
+        with llm_stream_events(_llm_stream_event_writer(out_dir, phase="chain_bottleneck_report")):
+            markdown = generate_llm_chain_bottleneck_report(chain_report, agent_report=agent_report_data)
         markdown = _prepend_lead_markdown(lead_markdown, markdown)
         markdown = _apply_report_quality_agent(args, out_dir, markdown, report_data)
         llm_chain_md.write_text(markdown, encoding="utf-8")
         llm_chain_html.write_text(_render_html(args, markdown, title=f"{args.topic} LLM Chain Bottleneck Report"), encoding="utf-8")
+        _emit_run_event(out_dir, "model_output", "LLM 产业链报告已生成", markdown[:900], {"artifact": llm_chain_md.name})
         print(f"LLM Chain Bottleneck Report: {llm_chain_md}")
         print(f"LLM Chain Bottleneck HTML: {llm_chain_html}")
     except Exception as exc:
@@ -852,11 +1189,13 @@ def _write_chain_explainer_llm_outputs(
     llm_chain_html = out_dir / "llm_chain_bottleneck_report.html"
     try:
         payload = {**report_data, "_report_kind": "chain_explainer"}
-        markdown = generate_llm_chain_explainer_report(payload, agent_report=agent_report_data)
+        with llm_stream_events(_llm_stream_event_writer(out_dir, phase="chain_explainer_report")):
+            markdown = generate_llm_chain_explainer_report(payload, agent_report=agent_report_data)
         markdown = _prepend_lead_markdown(lead_markdown, markdown)
         markdown = _apply_report_quality_agent(args, out_dir, markdown, payload)
         llm_chain_md.write_text(markdown, encoding="utf-8")
         llm_chain_html.write_text(_render_html(args, markdown, title=f"{args.topic} Chain Explainer Report"), encoding="utf-8")
+        _emit_run_event(out_dir, "model_output", "LLM 产业链解释报告已生成", markdown[:900], {"artifact": llm_chain_md.name})
         print(f"LLM Chain Explainer Report: {llm_chain_md}")
         print(f"LLM Chain Explainer HTML: {llm_chain_html}")
     except Exception as exc:

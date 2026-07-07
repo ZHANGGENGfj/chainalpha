@@ -649,6 +649,7 @@ def _professional_report_payload(report: dict[str, Any], max_docs: int = 12, max
         },
         "financial_snapshot": _snapshot_pack(financial),
         "price_snapshot": _snapshot_pack(price),
+        "six_dimension_analysis": report.get("six_dimension_analysis") or [],
         "valuation_view": report.get("valuation_view") or [],
         "news_evidence": [_doc_pack(doc) for doc in docs],
         "signals": [_signal_dict_brief(sig) for sig in signals],
@@ -830,11 +831,13 @@ def _professional_payload_chunks(payload: dict[str, Any]) -> list[dict[str, Any]
         "peer_or_chain_companies": payload.get("peer_or_chain_companies"),
         "financial_snapshot": payload.get("financial_snapshot"),
         "price_snapshot": payload.get("price_snapshot"),
+        "six_dimension_analysis": payload.get("six_dimension_analysis"),
         "valuation_view": payload.get("valuation_view"),
         "sentiment": payload.get("sentiment"),
         "scenarios": payload.get("scenarios"),
         "tracking_indicators": payload.get("tracking_indicators"),
         "data_quality_warnings": payload.get("data_quality_warnings"),
+        "tool_research_summary": payload.get("tool_research_summary"),
         "writing_guardrails": payload.get("writing_guardrails"),
         "mandatory_data_gaps": payload.get("mandatory_data_gaps"),
     }
@@ -898,11 +901,14 @@ def _compose_professional_report_from_chunk_notes(
         "business_model": payload.get("business_model"),
         "financial_snapshot": payload.get("financial_snapshot"),
         "price_snapshot": payload.get("price_snapshot"),
+        "six_dimension_analysis": payload.get("six_dimension_analysis"),
         "valuation_view": payload.get("valuation_view"),
         "sentiment": payload.get("sentiment"),
         "scenarios": payload.get("scenarios"),
         "tracking_indicators": payload.get("tracking_indicators"),
+        "filtered_signal_count": payload.get("filtered_signal_count"),
         "data_quality_warnings": payload.get("data_quality_warnings"),
+        "tool_research_summary": payload.get("tool_research_summary"),
         "writing_guardrails": payload.get("writing_guardrails"),
         "mandatory_data_gaps": payload.get("mandatory_data_gaps"),
         "chunk_notes": chunk_notes,
@@ -936,6 +942,8 @@ def _compose_professional_report_from_chunk_notes(
 2. 每个章节都要有内容；缺少硬数据时，写验证框架和需要补充的数据。
 3. 光模块产业链优先使用 corrected_chain_logic，不能把 GPU 集群写成直接上游，不能把激光器/光器件机械写成下游客户。
 4. 附录用自然语言说明数据来源和质量，不要出现程序字段名。
+5. 必须在“## 1. 核心结论”或“## 11. 跟踪指标仪表盘”中输出一个“投资六维分析表”，列为：维度、当前判断、证据、数据缺口、后续验证路径；六个维度必须包括技术面、资金面、基本面、产业景气度、政策、产业链。若某一维度缺少证据，写“数据缺口 + 后续验证路径”，不能省略。
+6. 如果输入里出现 filtered_signal_count 或数据质量提示，必须说明部分规则信号已被剔除；不得把来自F10、财务网页或搜索页的低置信度规则信号写成订单、政策、扩产、客户认证等确定事实。
 
 输入 JSON：
 {json.dumps(compact_payload, ensure_ascii=False, indent=2)}
@@ -960,6 +968,8 @@ def _industry_chain_pipeline_report_prompt(compact_payload: dict[str, Any]) -> s
 4. 可以列出“待核验相关公司”，但必须说明它们来自新闻、搜索线索或产业链映射，不能当作已证实供应商、客户或龙头。
 5. 每个关键判断都要写清楚：证据来源、投研含义、验证路径、证伪条件。
 6. 不要输出 JSON，不要输出程序字段名。
+7. 必须在“## 10. 催化剂、预期差与跟踪指标”中输出一个“六维跟踪指标表”，列为：维度、当前判断、证据、数据缺口、验证路径；六个维度必须包括技术面、资金面、基本面、产业景气度、政策、产业链。
+8. 如果输入里出现 filtered_signal_count 或数据质量提示，必须说明部分规则信号已被剔除；不得把来自F10、财务网页或搜索页的低置信度规则信号写成订单、政策、扩产、客户认证等确定事实。
 
 报告必须使用以下一级章节，标题和顺序不能改：
 
@@ -1037,6 +1047,7 @@ def _industry_chain_pipeline_report_prompt(compact_payload: dict[str, Any]) -> s
 - 公司催化剂
 - 市场已经定价什么
 - 可能超预期什么
+- 六维跟踪指标：技术面、资金面、基本面、产业景气度、政策、产业链
 - 跟踪指标仪表盘
 
 ## 11. 风险、反方观点与证伪条件

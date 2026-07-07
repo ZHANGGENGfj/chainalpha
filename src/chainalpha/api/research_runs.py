@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
@@ -24,6 +25,7 @@ SAFE_ARTIFACTS = {
     ".md": "text/markdown",
     ".svg": "image/svg+xml",
     ".txt": "text/plain",
+    ".jsonl": "application/x-ndjson",
 }
 
 router = APIRouter(prefix="/api", tags=["research-runs"])
@@ -280,6 +282,8 @@ def _run_summary(path: Path) -> dict:
     query_data = _read_json(path / "query_expansion.json")
     artifacts = [item.name for item in path.iterdir() if item.is_file() and item.suffix.lower() in SAFE_ARTIFACTS]
     companies = _company_names(topic_data, query_data)
+    timeline = _timeline_for(path)
+    live_output = _live_output_for(path)
     return {
         "run_id": run_id,
         "topic": topic_data.get("topic") or (running.topic if running else query_data.get("original_query")) or run_id,
@@ -297,7 +301,117 @@ def _run_summary(path: Path) -> dict:
         "artifacts": artifacts,
         "request": request_data,
         "log_tail": _tail(path / "run.log"),
+        "timeline": timeline,
+        "live_output": live_output,
     }
+
+
+def _timeline_for(path: Path, *, limit: int = 80) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    events.extend(_read_run_events(path / "run_events.jsonl"))
+    if not events:
+        events.extend(_timeline_from_existing_artifacts(path))
+    visible = [item for item in events if item.get("type") != "model_delta"]
+    return [_normalize_timeline_event(item) for item in visible[-limit:]]
+
+
+def _live_output_for(path: Path, *, max_chars: int = 16000) -> str:
+    parts: list[str] = []
+    for item in _read_run_events(path / "run_events.jsonl"):
+        if item.get("type") == "model_delta":
+            parts.append(str(item.get("message") or ""))
+    text = "".join(parts)
+    return text[-max_chars:]
+
+
+def _read_run_events(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            events.append(item)
+    return events
+
+
+def _timeline_from_existing_artifacts(path: Path) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    query = _read_json(path / "query_expansion.json")
+    if query:
+        events.append(
+            {
+                "ts": _mtime(path / "query_expansion.json"),
+                "type": "stage",
+                "title": "查询理解完成",
+                "message": ", ".join([str(item) for item in (query.get("keywords") or query.get("search_keywords") or [])[:8]]),
+                "data": {"artifact": "query_expansion.json"},
+            }
+        )
+    tool = _read_json(path / "tool_research_agent.json")
+    for step in (tool.get("steps") or [])[:20]:
+        if not isinstance(step, dict):
+            continue
+        events.append(
+            {
+                "ts": tool.get("generated_at") or _mtime(path / "tool_research_agent.json"),
+                "type": "tool_result",
+                "title": "工具检索",
+                "message": f"{step.get('action')}: {step.get('query')} ({step.get('documents_found')} docs)",
+                "data": step,
+            }
+        )
+    if (path / "final_report.md").exists():
+        events.append(
+            {
+                "ts": _mtime(path / "final_report.md"),
+                "type": "model_output",
+                "title": "最终报告已生成",
+                "message": _tail(path / "final_report.md", max_chars=900),
+                "data": {"artifact": "final_report.md"},
+            }
+        )
+    return events
+
+
+def _normalize_timeline_event(item: dict[str, Any]) -> dict[str, Any]:
+    data = item.get("data") if isinstance(item.get("data"), dict) else {}
+    documents = data.get("documents") if isinstance(data.get("documents"), list) else []
+    sites: list[str] = []
+    for doc in documents:
+        if not isinstance(doc, dict):
+            continue
+        url = str(doc.get("url") or "")
+        host = urlparse(url).netloc
+        if host:
+            sites.append(host)
+    return {
+        "ts": item.get("ts") or item.get("generated_at") or "",
+        "type": item.get("type") or "event",
+        "title": item.get("title") or "运行事件",
+        "message": item.get("message") or "",
+        "sites": list(dict.fromkeys(sites))[:8],
+        "data": data,
+    }
+
+
+def _current_stage(status: str, timeline: list[dict[str, Any]]) -> str:
+    if status == "completed":
+        return "已完成"
+    for item in reversed(timeline):
+        if item.get("type") in {"stage", "tool_plan", "tool_result", "model_output", "artifact"}:
+            title = str(item.get("title") or "").strip()
+            if title:
+                return title
+    if status == "failed":
+        return "失败"
+    return "运行中"
 
 
 def _status_for(run_id: str) -> str:
