@@ -9,12 +9,12 @@ Request:
 ```json
 {
   "topic": "电子布是什么，有没有投资机会",
-  "report_type": "industry-chain",
+  "report_type": "company",
   "depth": "standard",
   "llm_summary": true,
   "chain_visual": true,
   "report_quality_check": true,
-  "include_a_share_reports": false,
+  "include_a_share_reports": true,
   "limit": 80,
   "top_k_chunks": 60,
   "top_k_companies": 6

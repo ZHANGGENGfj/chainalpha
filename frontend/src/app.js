@@ -1,4 +1,4 @@
-import { createRun, createSession, fetchReport, fetchRuns, fetchSessions, parseMarkdownSections, saveSession } from "./api.js";
+import { createRun, createSession, deleteSession, fetchReport, fetchRuns, fetchSessions, parseMarkdownSections, saveSession } from "./api.js";
 
 let runs = [];
 let conversations = loadConversations();
@@ -10,12 +10,12 @@ const state = {
   isCreating: false,
   form: {
     topic: "",
-    reportType: "industry-chain",
+    reportType: "company",
     depth: "standard",
     llm: true,
     visual: true,
     quality: true,
-    filings: false,
+    filings: true,
     maxDocs: 80,
     topChunks: 60,
     companies: 6
@@ -23,13 +23,6 @@ const state = {
 };
 
 let forceScrollBottom = false;
-
-const reportTypeLabels = {
-  topic: "主题研究",
-  company: "单公司深度",
-  "industry-chain": "产业链瓶颈",
-  daily: "每日扫描"
-};
 
 function activeConversation() {
   return conversations.find((item) => item.id === state.activeConversationId) || null;
@@ -61,9 +54,10 @@ function render() {
           <div class="history-label">会话</div>
           <div class="history-list">
             ${conversations.map((item) => `
-              <button class="history-item ${item.id === state.activeConversationId ? "active" : ""}" data-session="${item.id}">
-                ${escapeHtml(item.title || "新研究")}
-              </button>
+              <div class="history-entry ${item.id === state.activeConversationId ? "active" : ""}">
+                <button class="history-item" data-session="${item.id}">${escapeHtml(item.title || "新研究")}</button>
+                <button class="history-delete" data-delete-session="${item.id}" title="删除会话" aria-label="删除会话">×</button>
+              </div>
             `).join("")}
           </div>
         </div>
@@ -96,29 +90,6 @@ function render() {
               <button type="button" class="send-button" id="create-run" ${state.isCreating ? "disabled" : ""}>
                 ${state.isCreating ? "…" : "↑"}
               </button>
-            </div>
-            <div class="option-strip">
-              <label>
-                <span>类型</span>
-                <select name="reportType">
-                  ${option("topic", "主题研究", state.form.reportType)}
-                  ${option("company", "单公司深度", state.form.reportType)}
-                  ${option("industry-chain", "产业链瓶颈", state.form.reportType)}
-                  ${option("daily", "每日扫描", state.form.reportType)}
-                </select>
-              </label>
-              <label>
-                <span>深度</span>
-                <select name="depth">
-                  ${option("quick", "快速", state.form.depth)}
-                  ${option("standard", "标准", state.form.depth)}
-                  ${option("deep", "深度", state.form.depth)}
-                </select>
-              </label>
-              ${toggle("llm", "LLM", state.form.llm)}
-              ${toggle("visual", "图谱", state.form.visual)}
-              ${toggle("quality", "质检", state.form.quality)}
-              ${toggle("filings", "公告", state.form.filings)}
             </div>
           </form>
           <p class="disclaimer">ChainAlpha 可能会出错。重要投资判断请核验原始公告、财报和行情数据。</p>
@@ -154,22 +125,33 @@ function renderMessage(message) {
     return `
       <article class="message user-message" data-message-id="${escapeAttr(message.id || "")}">
         <div class="message-body user-body">${escapeHtml(message.text)}</div>
+        <button class="copy-message-button" data-copy-text="${escapeAttr(message.text || "")}" title="复制">复制</button>
       </article>
     `;
   }
+  const copyText = assistantCopyText(message);
   return `
     <article class="message assistant-message" data-message-id="${escapeAttr(message.id || "")}">
       <div class="assistant-avatar">CA</div>
       <div class="message-body assistant-body">
         ${message.status === "running" ? renderThinking(message) : renderAssistantAnswer(message)}
       </div>
+      <button class="copy-message-button" data-copy-text="${escapeAttr(copyText)}" title="复制">复制</button>
     </article>
   `;
 }
 
+function assistantCopyText(message) {
+  if (message.status === "running") return "研究进行中，最终报告尚未生成。";
+  if (message.sections?.length) {
+    return message.sections
+      .map((section) => [`# ${section.title}`, ...(section.body || [])].join("\n\n"))
+      .join("\n\n");
+  }
+  return message.text || "";
+}
+
 function renderThinking(message) {
-  const steps = ["创建任务", "查询扩展", "数据抓取", "事件抽取", "产业链分析", "财务验证", "报告生成", "质量检查"];
-  const activeIndex = inferProgressIndex(message.stage, message.logTail);
   return `
     <div class="thinking">
       <div class="thinking-title">
@@ -177,59 +159,87 @@ function renderThinking(message) {
         <strong>正在研究这个问题</strong>
       </div>
       <p>${escapeHtml(message.stage || "任务已提交，正在准备数据。")}</p>
-      <div class="progress-steps">
-        ${steps
-          .map((step, index) => `<span class="${index < activeIndex ? "done" : index === activeIndex ? "active" : ""}">${escapeHtml(step)}</span>`)
-          .join("")}
-      </div>
       ${renderTimeline(message)}
-      ${renderLiveReport(message)}
-      ${renderStream(message)}
-    </div>
-  `;
-}
-
-function renderLiveReport(message) {
-  const text = String(message.liveOutput || "").trim();
-  if (!text) return "";
-  return `
-    <div class="live-report">
-      <div class="live-report-head">
-        <strong>模型实时输出</strong>
-        <span>正在生成报告正文</span>
-      </div>
-      <pre>${escapeHtml(text)}</pre>
     </div>
   `;
 }
 
 function renderTimeline(message) {
-  const events = (message.timeline || []).slice(-12);
-  if (!events.length) return "";
+  const pages = collectVisitedPages(message.timeline || []);
+  const expanded = Boolean(message.showTimeline);
   return `
     <div class="live-timeline">
       <div class="live-timeline-head">
-        <strong>实时研究过程</strong>
-        <span>展示模型决策、检索网站和阶段性输出</span>
-      </div>
-      ${events.map((event) => `
-        <div class="live-event ${escapeAttr(event.type || "event")}">
-          <div class="live-event-main">
-            <span class="event-type">${eventTypeLabel(event.type)}</span>
-            <strong>${escapeHtml(event.title || "运行事件")}</strong>
-            ${event.ts ? `<time>${escapeHtml(event.ts)}</time>` : ""}
-          </div>
-          ${event.message ? `<p>${escapeHtml(event.message)}</p>` : ""}
-          ${event.sites?.length ? `
-            <div class="site-chips">
-              ${event.sites.map((site) => `<span>${escapeHtml(site)}</span>`).join("")}
-            </div>
-          ` : ""}
-          ${renderEventDocuments(event)}
+        <div>
+          <strong>正在检索公开网页</strong>
+          <span>${pages.length ? `已获取 ${pages.length} 个相关页面` : "正在等待检索结果"}</span>
         </div>
-      `).join("")}
+        <button class="timeline-toggle" data-toggle-timeline="${escapeAttr(message.id || "")}">
+          ${expanded ? "收起网页" : "查看网页"}
+        </button>
+      </div>
+      ${expanded ? `
+        <div class="live-timeline-detail">
+          <div class="live-timeline-subtitle">仅展示已抓取的公开页面；搜索入口页不作为报告证据。</div>
+          ${pages.length ? `
+            <div class="event-docs visited-pages">
+              ${pages.map((page) => `
+                <div class="event-doc">
+                  <span>${escapeHtml(page.source || page.host || "公开网页")}</span>
+                  <a href="${escapeAttr(page.url)}" target="_blank" rel="noreferrer">${escapeHtml(page.title || page.url)}</a>
+                </div>
+              `).join("")}
+            </div>
+          ` : `<div class="thinking-compact"><span class="pulse-dot"></span><span>尚未获得可用网页结果。</span></div>`}
+        </div>
+      ` : `
+        <div class="thinking-compact">
+          <span class="pulse-dot"></span>
+          <span>正在检索并核验公开资料。</span>
+          ${pages.length ? `<span class="compact-sites">${pages.slice(0, 3).map((page) => escapeHtml(page.host || page.source)).join(" / ")}</span>` : ""}
+        </div>
+      `}
     </div>
   `;
+}
+
+function collectVisitedPages(timeline) {
+  const pages = [];
+  const seen = new Set();
+  for (const event of timeline) {
+    if (!['tool_result', 'crawler'].includes(event.type)) continue;
+    const docs = event.data?.documents || event.data?.pages || [];
+    for (const doc of docs) {
+      const url = String(doc?.url || "").trim();
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      let host = "";
+      try { host = new URL(url).host; } catch (_) { /* local evidence has no public URL */ }
+      pages.push({
+        url,
+        host,
+        title: String(doc.title || url),
+        source: String(doc.source || doc.source_type || host),
+      });
+    }
+  }
+  return pages.slice(-16);
+}
+
+function bindTimelineButton(button) {
+  button.addEventListener("click", () => {
+    const message = findMessage(button.dataset.toggleTimeline);
+    if (!message) return;
+    message.showTimeline = !message.showTimeline;
+    saveConversations();
+    updateAssistantMessage(message, {follow: false});
+  });
+}
+
+function bindTimelineButtons(root = document) {
+  root.querySelectorAll("[data-toggle-timeline]").forEach((button) => {
+    bindTimelineButton(button);
+  });
 }
 
 function renderEventDocuments(event) {
@@ -286,21 +296,68 @@ function renderAssistantAnswer(message) {
         </section>
       `).join("")}
     </div>
-    ${message.artifacts?.length ? `
-      <div class="artifact-line">
-        ${message.artifacts.map((artifact) => `
-          <button data-run-id="${escapeAttr(message.runId)}" data-artifact="${escapeAttr(artifact)}">${escapeHtml(artifact)}</button>
-        `).join("")}
-      </div>
-    ` : ""}
   `;
 }
 
 function renderParagraph(value) {
   const text = String(value || "").trim();
   if (!text) return "";
-  if (text.startsWith("|")) return `<pre>${escapeHtml(text)}</pre>`;
-  return `<p>${escapeHtml(text)}</p>`;
+  if (isMarkdownTable(text)) return renderMarkdownTable(text);
+  if (/^(?:[-*]\s+)/.test(text)) {
+    const items = text
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^(?:[-*]\s+)/, "").trim())
+      .filter(Boolean);
+    return `<ul>${items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</ul>`;
+  }
+  return `<p>${renderInlineMarkdown(text)}</p>`;
+}
+
+function isMarkdownTable(text) {
+  const lines = String(text || "").split(/\r?\n/).filter((line) => line.trim());
+  return lines.length >= 2
+    && lines[0].includes("|")
+    && /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[1]);
+}
+
+function markdownTableCells(line) {
+  return String(line || "")
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function renderMarkdownTable(text) {
+  const lines = String(text || "").split(/\r?\n/).filter((line) => line.trim());
+  const headers = markdownTableCells(lines[0]);
+  const rows = lines.slice(2)
+    .filter((line) => line.includes("|"))
+    .map(markdownTableCells)
+    .filter((cells) => cells.some(Boolean));
+  if (!headers.length || !rows.length) return `<pre>${escapeHtml(text)}</pre>`;
+
+  return `
+    <div class="markdown-table-wrap">
+      <table class="markdown-table">
+        <thead><tr>${headers.map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`).join("")}</tr></thead>
+        <tbody>
+          ${rows.map((cells) => `<tr>${headers.map((_, index) => `<td>${renderInlineMarkdown(cells[index] || "")}</td>`).join("")}</tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderInlineMarkdown(value) {
+  let html = escapeHtml(value);
+  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_match, label, url) => (
+    `<a href="${url}" target="_blank" rel="noreferrer">${label}</a>`
+  ));
+  return html.replace(/\n/g, "<br>");
 }
 
 function bindEvents() {
@@ -308,7 +365,16 @@ function bindEvents() {
     button.addEventListener("click", () => {
       state.activeConversationId = button.dataset.session;
       state.form.topic = "";
+      forceScrollBottom = true;
       render();
+      scrollChatToBottom();
+    });
+  });
+  document.querySelectorAll("[data-delete-session]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      deleteConversation(button.dataset.deleteSession);
     });
   });
 
@@ -341,15 +407,68 @@ function bindEvents() {
     window.alert("报告产物仍按 run_id 存储；左侧显示的是浏览器本地会话。");
   });
 
-  document.querySelectorAll("[data-artifact]").forEach((button) => {
-    bindArtifactButton(button);
-  });
+  bindTimelineButtons();
+  bindCopyButtons();
+}
+
+async function deleteConversation(sessionId) {
+  const conversation = conversations.find((item) => item.id === sessionId);
+  if (!conversation) return;
+  if (!window.confirm(`删除“${conversation.title || "新研究"}”吗？此操作不可恢复。`)) return;
+  try {
+    if (sessionStore === "api") await deleteSession(sessionId);
+    conversations = conversations.filter((item) => item.id !== sessionId);
+    if (!conversations.length) {
+      const session = sessionStore === "api"
+        ? await createSession("新研究")
+        : createConversation("新研究");
+      conversations = [session];
+    }
+    if (state.activeConversationId === sessionId) {
+      state.activeConversationId = conversations[0].id;
+    }
+    saveConversations();
+    forceScrollBottom = true;
+    render();
+    scrollChatToBottom();
+  } catch (error) {
+    window.alert("删除会话失败，请稍后重试。");
+  }
 }
 
 function bindArtifactButton(button) {
   button.addEventListener("click", () => {
     if (state.apiMode !== "api") return;
     window.open(`/api/runs/${encodeURIComponent(button.dataset.runId)}/files/${encodeURIComponent(button.dataset.artifact)}`, "_blank");
+  });
+}
+
+function bindCopyButtons(root = document) {
+  root.querySelectorAll("[data-copy-text]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const text = button.dataset.copyText || "";
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        button.textContent = "已复制";
+        setTimeout(() => {
+          button.textContent = "复制";
+        }, 1200);
+      } catch (error) {
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand("copy");
+        area.remove();
+        button.textContent = "已复制";
+        setTimeout(() => {
+          button.textContent = "复制";
+        }, 1200);
+      }
+    });
   });
 }
 
@@ -378,7 +497,8 @@ async function createResearchRun() {
     status: "running",
     stage: "正在创建任务",
     logTail: "",
-    runId: ""
+    runId: "",
+    showTimeline: false
   };
   conversation.messages.push(assistantMessage);
   saveConversations();
@@ -558,6 +678,8 @@ function updateAssistantMessage(message, {follow = false} = {}) {
   element.outerHTML = renderMessage(message);
   const nextElement = messageElement(message.id);
   nextElement?.querySelectorAll("[data-artifact]").forEach(bindArtifactButton);
+  if (nextElement) bindTimelineButtons(nextElement);
+  if (nextElement) bindCopyButtons(nextElement);
   requestAnimationFrame(() => {
     const current = document.querySelector(".chat-scroll");
     if (!current) return;
@@ -705,7 +827,7 @@ function restoreScrollState(scrollState) {
   if (!scroller) return;
   requestAnimationFrame(() => {
     if (forceScrollBottom || scrollState?.wasNearBottom) {
-      scroller.scrollTop = scroller.scrollHeight;
+      scrollChatToBottom();
       forceScrollBottom = false;
       return;
     }
@@ -713,18 +835,16 @@ function restoreScrollState(scrollState) {
   });
 }
 
-function option(value, label, selected) {
-  return `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`;
-}
-
-function toggle(name, label, checked) {
-  return `
-    <label class="toggle">
-      <input type="checkbox" name="${name}" ${checked ? "checked" : ""} />
-      <span></span>
-      ${label}
-    </label>
-  `;
+function scrollChatToBottom() {
+  const apply = () => {
+    const scroller = document.querySelector(".chat-scroll");
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+  };
+  requestAnimationFrame(() => {
+    apply();
+    requestAnimationFrame(apply);
+    setTimeout(apply, 80);
+  });
 }
 
 function streamLinesFromLog(logTail) {
@@ -773,7 +893,11 @@ function escapeAttr(value) {
 render();
 refreshRunsSilently()
   .then(loadSessionsFromApi)
-  .then(render);
+  .then(() => {
+    forceScrollBottom = true;
+    render();
+    scrollChatToBottom();
+  });
 
 async function loadSessionsFromApi() {
   try {

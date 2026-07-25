@@ -145,7 +145,7 @@ class LLMClient:
                 continue
             chunks.append(delta)
             buffer += delta
-            if len(buffer) >= 80 or "\n" in buffer:
+            if len(buffer) >= 20 or "\n" in buffer:
                 callback({"type": "model_delta", "message": buffer})
                 buffer = ""
         if buffer:

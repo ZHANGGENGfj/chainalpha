@@ -384,6 +384,7 @@ def topic_research(
     out_dir: Path = typer.Option(Path("./data/runs"), help="Output directory."),
     limit: int = typer.Option(80, help="Maximum source documents to fetch."),
     top_k_chunks: int = typer.Option(60, help="Top chunks to analyze."),
+    retrieval_backend: str = typer.Option("auto", help="Retrieval backend: auto, hybrid, or llamaindex."),
     llm_summary: bool = typer.Option(False, help="Generate final LLM summary."),
 ) -> None:
     """Research one company or sector topic."""
@@ -395,6 +396,7 @@ def topic_research(
         prices=prices,
         limit=limit,
         top_k_chunks=top_k_chunks,
+        retrieval_backend=retrieval_backend,
     )
     run_dir = out_dir / datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)

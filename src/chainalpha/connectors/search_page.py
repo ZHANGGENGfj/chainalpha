@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -41,6 +42,7 @@ class SearchPageConnector(BaseConnector):
         allowed_domains: list[str] | None = None,
         source_type: str = "web_search_page",
         fetch_linked_pages: bool = False,
+        include_search_pages: bool = True,
         max_linked_pages_per_query: int = 5,
         timeout: int = 20,
         sleep_seconds: float = 0.2,
@@ -54,6 +56,7 @@ class SearchPageConnector(BaseConnector):
             allowed_domains=allowed_domains,
             source_type=source_type,
             fetch_linked_pages=fetch_linked_pages,
+            include_search_pages=include_search_pages,
             max_linked_pages_per_query=max_linked_pages_per_query,
             timeout=timeout,
             **params,
@@ -63,6 +66,7 @@ class SearchPageConnector(BaseConnector):
         self.allowed_domains = allowed_domains or []
         self.source_type = source_type
         self.fetch_linked_pages = fetch_linked_pages
+        self.include_search_pages = include_search_pages
         self.max_linked_pages_per_query = max_linked_pages_per_query
         self.timeout = timeout
         self.sleep_seconds = sleep_seconds
@@ -82,7 +86,7 @@ class SearchPageConnector(BaseConnector):
             parser = parse_html(resp.text, base_url=url)
             title = parser.title() or f"{self.name} search page"
             content = parser.text()
-            if text_matches(f"{title}\n{content}", request):
+            if self.include_search_pages and text_matches(f"{title}\n{content}", request):
                 docs.append(
                     build_source_document(
                         source=self.name,
@@ -95,7 +99,10 @@ class SearchPageConnector(BaseConnector):
                 )
 
             if self.fetch_linked_pages:
-                links = unique_links(parser.links, self.allowed_domains)[: self.max_linked_pages_per_query]
+                links = _rank_links_for_request(
+                    unique_links(parser.links, self.allowed_domains),
+                    request,
+                )[: self.max_linked_pages_per_query]
                 docs.extend(self._fetch_links(links, request, parent_url=url))
 
             if request.limit is not None and len(docs) >= request.limit:
@@ -125,6 +132,25 @@ class SearchPageConnector(BaseConnector):
             except Exception:
                 continue
         return docs
+
+
+def _rank_links_for_request(
+    links: list[tuple[str, str]],
+    request: FetchRequest,
+) -> list[tuple[str, str]]:
+    """Prefer result links whose anchor text carries the issuer name or code."""
+    query = " ".join(request.terms or [request.query or ""])
+    tokens = [token.lower() for token in re.split(r"[\s,，;；|]+", query) if len(token) >= 2]
+
+    def score(item: tuple[str, str]) -> tuple[int, int]:
+        url, label = item
+        haystack = f"{label} {url}".lower()
+        matches = sum(1 for token in tokens if token in haystack)
+        # Detail URLs tend to be more useful than root/list/search URLs.
+        is_landing = int(any(marker in url.lower() for marker in ("search", "searchresult", "searchlist", "?q=", "?keyword=")))
+        return matches, -is_landing
+
+    return sorted(links, key=score, reverse=True)
 
 
 PREDEFINED_NEWS_SOURCES: dict[str, dict[str, Any]] = {

@@ -29,10 +29,17 @@ export async function saveSession(session) {
   });
 }
 
+export async function deleteSession(sessionId) {
+  return requestJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "DELETE"
+  });
+}
+
 export async function createRun(form, context = {}) {
   const payload = {
     topic: form.topic,
-    report_type: form.reportType,
+    // The web workspace currently focuses on the single-company workflow.
+    report_type: "company",
     depth: form.depth,
     llm_summary: form.llm,
     chain_visual: form.visual,

@@ -33,6 +33,7 @@ from chainalpha.investment.news_enrichment import enrich_valuable_news_documents
 from chainalpha.investment.topic_valuation import build_target_valuation_view
 from chainalpha.investment.web_financial_facts import extract_web_financial_facts
 from chainalpha.memory.index import HybridIndex
+from chainalpha.retrieval.llamaindex_retriever import select_documents_with_llamaindex
 from chainalpha.ontology.industry_graph import IndustryGraph
 from chainalpha.pipeline import analyze_chunks
 from chainalpha.schemas import (
@@ -225,6 +226,7 @@ def build_topic_research_report(
     extra_documents: list[SourceDocument] | None = None,
     enable_financial_web: bool = True,
     company_profile_source: str = "llm",
+    retrieval_backend: str = "auto",
 ) -> TopicResearchReport:
     profiles = _resolve_company_profiles(
         topic,
@@ -270,7 +272,14 @@ def build_topic_research_report(
 
     sorted_docs = _sort_documents(docs)
     chunks = source_documents_to_chunks(sorted_docs)
-    selected_docs = _select_documents(expanded_query or topic, chunks, sorted_docs, top_k_docs)
+    selected_docs, retrieval_warnings = _select_documents(
+        expanded_query or topic,
+        chunks,
+        sorted_docs,
+        top_k_docs,
+        backend=retrieval_backend,
+    )
+    warnings.extend(retrieval_warnings)
     signals, _, _ = analyze_chunks(chunks, query=expanded_query or topic, top_k_chunks=top_k_chunks, out_dir=None, store=None)
 
     graph = IndustryGraph.load_ai_graph()
@@ -345,7 +354,7 @@ def build_topic_research_report(
     primary_company_name = company_views[0].company.name if company_views else ""
     primary_ticker = company_views[0].company.ticker if company_views else ""
     web_financial_facts = extract_web_financial_facts(
-        [doc.to_dict() for doc in sorted_docs],
+        [doc.to_dict() for doc in [*sorted_docs, *report_docs]],
         company_name=primary_company_name,
         ticker=primary_ticker,
     )
@@ -2055,14 +2064,45 @@ def _sort_documents(docs: list[SourceDocument]) -> list[SourceDocument]:
     return sorted(docs, key=lambda doc: doc.published_at or doc.fetched_at or datetime.min, reverse=True)
 
 
-def _select_documents(topic: str, chunks: list, docs: list[SourceDocument], top_k_docs: int) -> list[SourceDocument]:
+def _select_documents(
+    topic: str,
+    chunks: list,
+    docs: list[SourceDocument],
+    top_k_docs: int,
+    *,
+    backend: str = "auto",
+) -> tuple[list[SourceDocument], list[str]]:
+    backend = (backend or "auto").strip().lower()
+    warnings: list[str] = []
     if not chunks:
-        return docs[:top_k_docs]
+        return docs[:top_k_docs], warnings
+    if backend in {"auto", "llamaindex"}:
+        selection = select_documents_with_llamaindex(
+            query=topic,
+            chunks=chunks,
+            docs=docs,
+            top_k_docs=top_k_docs,
+        )
+        if selection.documents:
+            warnings.extend(selection.warnings)
+            warnings.append(
+                "Retrieval backend: "
+                f"{selection.backend}; selected={len(selection.documents)}; "
+                f"chunks={selection.metadata.get('chunks', len(chunks))}."
+            )
+            return selection.documents, warnings
+        warnings.extend(selection.warnings)
+        if backend == "llamaindex":
+            warnings.append("LlamaIndex retrieval produced no result; falling back to original HybridIndex to keep the report usable.")
+    elif backend != "hybrid":
+        warnings.append(f"Unknown retrieval_backend={backend!r}; falling back to HybridIndex.")
+
     selected_chunks = HybridIndex(chunks).search(topic, top_k=min(len(chunks), top_k_docs * 3))
     doc_ids = list(dict.fromkeys(chunk.document_id for chunk in selected_chunks))
     doc_by_id = {doc.id: doc for doc in docs}
     selected = [doc_by_id[doc_id] for doc_id in doc_ids if doc_id in doc_by_id]
-    return selected or docs[:top_k_docs]
+    warnings.append(f"Retrieval backend: hybrid; selected={len(selected or docs[:top_k_docs])}; chunks={len(chunks)}.")
+    return selected or docs[:top_k_docs], warnings
 
 
 def _find_related_companies(
@@ -2718,15 +2758,9 @@ def render_professional_topic_report(report: TopicResearchReport) -> str:
         "",
         _render_executive_summary(report),
         "",
-        "## 二、投资六维分析",
+        "## 二、近期热点新闻与公告",
         "",
     ]
-    lines.extend(_six_dimension_lines(report))
-    lines.extend([
-        "",
-        "## 三、近期热点新闻与公告",
-        "",
-    ])
     for item in _hot_news_items(report):
         lines.append(f"- {item}")
 

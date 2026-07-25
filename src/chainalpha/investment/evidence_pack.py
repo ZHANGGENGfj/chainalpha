@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from chainalpha.investment.report_extractors import (
@@ -60,12 +61,16 @@ def build_professional_evidence_pack(
             f"已剔除 {dropped_signal_count} 条低置信度规则信号；这些信号多来自F10/财务网页/搜索页，"
             "不得当作订单、政策、扩产或客户认证事实。"
         )
+    research_type = str(report.get("research_type") or "").strip().lower()
+    if research_type not in {"company", "industry-chain"}:
+        research_type = "industry-chain" if topic_class in {"raw_material_chain", "component_chain", "industry_chain"} else "company"
+    web_financial_facts = _financial_web_fact_pack(report.get("web_financial_facts") or {})
     return {
         "topic": report.get("topic"),
         "generated_at": report.get("generated_at"),
         "query_expansion": query_expansion,
         "topic_class": topic_class,
-        "research_type": "industry-chain" if topic_class in {"raw_material_chain", "component_chain", "industry_chain"} else "company",
+        "research_type": research_type,
         "target_company": {
             "name": company.get("name"),
             "ticker": company.get("ticker"),
@@ -90,6 +95,8 @@ def build_professional_evidence_pack(
         },
         "financial_snapshot": _snapshot_pack(financial),
         "price_snapshot": _snapshot_pack(price),
+        "web_financial_facts": web_financial_facts,
+        "financial_fact_matrix": _financial_fact_matrix(web_financial_facts),
         "financial_report_summaries": _trim_deep(financial_summaries[:max_a_share_reports + 8]),
         "broker_report_summaries": _trim_deep(broker_summaries[:8]),
         "six_dimension_analysis": _trim_deep(report.get("six_dimension_analysis") or []),
@@ -108,6 +115,81 @@ def build_professional_evidence_pack(
         "writing_guardrails": _writing_guardrails(),
         "mandatory_data_gaps": _mandatory_data_gaps(financial, price, financial_summaries, broker_summaries),
     }
+
+
+def _financial_web_fact_pack(raw: Any, *, max_per_category: int = 2) -> dict[str, list[dict[str, Any]]]:
+    """Keep the most useful financial-page snippets visible to the report LLM."""
+    if not isinstance(raw, dict):
+        return {}
+    packed: dict[str, list[dict[str, Any]]] = {}
+    for category, facts in raw.items():
+        if not isinstance(facts, list):
+            continue
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for fact in facts:
+            if not isinstance(fact, dict):
+                continue
+            url = str(fact.get("url") or "").strip()
+            excerpt = str(fact.get("excerpt") or "").strip()
+            key = url or excerpt[:100]
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                {
+                    "source": fact.get("source") or "公开财务网页",
+                    "title": fact.get("title") or category,
+                    "url": url,
+                    "published_at": fact.get("published_at") or "",
+                    "period_or_basis": _financial_period_or_basis(excerpt, fact.get("published_at") or ""),
+                    "confidence": fact.get("confidence") or "low",
+                    "matched_terms": fact.get("matched_terms") or [],
+                    "excerpt": excerpt[:700],
+                }
+            )
+            if len(rows) >= max_per_category:
+                break
+        if rows:
+            packed[str(category)] = rows
+    return packed
+
+
+def _financial_fact_matrix(facts_by_category: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """A compact, report-ready index: one traceable fact per requested category."""
+    rows: list[dict[str, Any]] = []
+    for category, facts in facts_by_category.items():
+        if not facts:
+            continue
+        fact = facts[0]
+        rows.append(
+            {
+                "category": category,
+                "evidence": fact.get("excerpt") or "",
+                "period_or_basis": fact.get("period_or_basis") or "口径未识别",
+                "source": fact.get("source") or "",
+                "url": fact.get("url") or "",
+                "confidence": fact.get("confidence") or "low",
+            }
+        )
+    return rows
+
+
+def _financial_period_or_basis(excerpt: str, published_at: Any) -> str:
+    """Expose an explicit reporting period when a financial web page contains one."""
+    text = str(excerpt or "")
+    patterns = (
+        r"20\d{2}\s*年\s*(?:第?[一二三四1-4]季度|中报|半年报|年报)",
+        r"20\d{2}\s*[Qq][1-4]",
+        r"20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}",
+        r"(?:本期|报告期|同比|环比|TTM)",
+    )
+    matches: list[str] = []
+    for pattern in patterns:
+        matches.extend(re.findall(pattern, text))
+    if matches:
+        return "；".join(dict.fromkeys(matches))[:80]
+    return f"网页抓取时间：{published_at}" if published_at else "口径未识别"
 
 
 def _snapshot_pack(snapshot: Any) -> dict[str, Any] | None:

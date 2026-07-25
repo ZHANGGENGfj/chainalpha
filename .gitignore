@@ -23,3 +23,6 @@ third_party/MediaCrawler-main/venv/
 third_party/MediaCrawler-main/__pycache__/
 weekk/
 hmwork/
+third_party/
+report_pdf/
+report_finance_processed/

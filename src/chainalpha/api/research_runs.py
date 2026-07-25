@@ -33,13 +33,16 @@ router = APIRouter(prefix="/api", tags=["research-runs"])
 
 class CreateRunRequest(BaseModel):
     topic: str = Field(..., min_length=1, max_length=300)
-    report_type: Literal["topic", "company", "industry-chain", "daily"] = "industry-chain"
+    # The web product opens in single-company deep-research mode. Other
+    # workflows remain available from the CLI for internal use.
+    report_type: Literal["topic", "company", "industry-chain", "daily"] = "company"
     depth: Literal["quick", "standard", "deep"] = "standard"
     llm_summary: bool = True
     chain_visual: bool = True
     report_quality_check: bool = True
-    include_a_share_reports: bool = False
+    include_a_share_reports: bool = True
     company_profile_source: Literal["llm", "local", "hybrid", "resolver"] = "llm"
+    retrieval_backend: Literal["auto", "hybrid", "llamaindex"] = "auto"
     skip_refresh_news: bool = True
     limit: int = Field(80, ge=1, le=300)
     top_k_chunks: int = Field(60, ge=1, le=300)
@@ -74,7 +77,16 @@ def create_run(req: CreateRunRequest) -> dict:
     output_dir = RUN_ROOT / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / "run.log"
+    # The public web workspace is intentionally a single-company product.
+    # Normalize stale browser state and direct API calls before persisting or
+    # starting a task, so an old "industry-chain" selection cannot leak into
+    # the company-report pipeline.
     request_data = req.dict()
+    request_data["report_type"] = "company"
+    request_data["llm_summary"] = True
+    request_data["chain_visual"] = True
+    request_data["report_quality_check"] = True
+    request_data["include_a_share_reports"] = True
     (output_dir / "run_request.json").write_text(
         json.dumps(request_data, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -159,6 +171,15 @@ def save_session(session_id: str, payload: ChatSessionPayload) -> dict:
     return session
 
 
+@router.delete("/sessions/{session_id}")
+def delete_session(session_id: str) -> dict:
+    path = _session_path(session_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+    path.unlink()
+    return {"deleted": True, "id": session_id}
+
+
 @router.get("/runs")
 def list_runs() -> dict:
     RUN_ROOT.mkdir(parents=True, exist_ok=True)
@@ -183,7 +204,7 @@ def stream_run(run_id: str) -> StreamingResponse:
 
     def events():
         last_payload = ""
-        for _ in range(60 * 60):
+        for _ in range(60 * 60 * 5):
             summary = _run_summary(path)
             payload = json.dumps(summary, ensure_ascii=False)
             if payload != last_payload:
@@ -191,7 +212,7 @@ def stream_run(run_id: str) -> StreamingResponse:
                 last_payload = payload
             if summary.get("status") in {"completed", "failed", "unknown"}:
                 break
-            time.sleep(1)
+            time.sleep(0.05)
 
     return StreamingResponse(events(), media_type="text/event-stream")
 
@@ -249,23 +270,14 @@ def _build_run_command(req: CreateRunRequest, run_id: str) -> list[str]:
         str(req.top_k_companies),
         "--company-profile-source",
         req.company_profile_source,
+        "--retrieval-backend",
+        req.retrieval_backend,
         "--output-mode",
         "final",
+        "--research-type",
+        "company",
     ]
-    if req.report_type == "daily":
-        cmd.append("--daily-scan")
-    elif req.report_type == "industry-chain":
-        cmd.extend(["--research-type", "industry-chain", "--chain-bottleneck-report"])
-    elif req.report_type == "company":
-        cmd.extend(["--research-type", "company"])
-    if req.llm_summary:
-        cmd.append("--llm-summary")
-    if req.chain_visual:
-        cmd.append("--chain-visual")
-    if not req.report_quality_check:
-        cmd.append("--skip-report-check")
-    if req.include_a_share_reports:
-        cmd.append("--include-a-share-reports")
+    cmd.extend(["--llm-summary", "--chain-visual", "--include-a-share-reports"])
     if req.skip_refresh_news:
         cmd.append("--skip-refresh-news")
     return cmd
@@ -283,7 +295,9 @@ def _run_summary(path: Path) -> dict:
     artifacts = [item.name for item in path.iterdir() if item.is_file() and item.suffix.lower() in SAFE_ARTIFACTS]
     companies = _company_names(topic_data, query_data)
     timeline = _timeline_for(path)
-    live_output = _live_output_for(path)
+    # The chat UI intentionally exposes source pages, not intermediate model
+    # drafts. Final output is shown only after the report artifact is complete.
+    live_output = ""
     return {
         "run_id": run_id,
         "topic": topic_data.get("topic") or (running.topic if running else query_data.get("original_query")) or run_id,

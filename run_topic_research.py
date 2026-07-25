@@ -123,11 +123,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k-chunks", type=int, default=60, help="Top chunks to analyze.")
     parser.add_argument("--top-k-companies", type=int, default=1, help="Maximum related companies to analyze. Defaults to target-company focus.")
     parser.add_argument("--top-k-candidates", type=int, default=8, help="Maximum candidates to output.")
+    parser.add_argument(
+        "--retrieval-backend",
+        choices=["auto", "hybrid", "llamaindex"],
+        default="auto",
+        help="Document retrieval backend. auto tries LlamaIndex first, then falls back to the built-in HybridIndex.",
+    )
     parser.add_argument("--include-a-share-reports", action="store_true", help="Fetch and parse A-share filings/PDF reports. Disabled by default.")
     parser.add_argument(
         "--research-type",
         choices=["auto", "company", "industry-chain"],
-        default="auto",
+        default="company",
         help="Report workflow type. Use industry-chain for materials/components/themes such as 电子布; use company for single-company reports.",
     )
     parser.add_argument("--chain-bottleneck-report", action="store_true", help="Generate industry-chain bottleneck power report.")
@@ -146,7 +152,12 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(skip_report_check_web=True)
     parser.add_argument("--skip-tool-agent", action="store_true", help="Disable LangGraph tool-use evidence search inside the normal report flow.")
     parser.add_argument("--skip-tool-agent-web", action="store_true", help="Disable public web search inside the LangGraph tool-use evidence agent.")
-    parser.add_argument("--tool-agent-iterations", type=int, default=3, help="Maximum LangGraph tool-use evidence search iterations.")
+    parser.add_argument(
+        "--tool-agent-iterations",
+        type=int,
+        default=0,
+        help="Deprecated compatibility option. Tool search now stops when evidence coverage is complete or exhausted.",
+    )
     parser.add_argument("--tool-agent-top-k", type=int, default=6, help="Maximum documents per LangGraph tool call.")
     parser.add_argument("--broker-name", default="", help="Optional broker/institution name shown at the top of generated HTML reports.")
     parser.add_argument("--broker-logo", default="", help="Optional broker/institution logo path or URL shown at the top of generated HTML reports.")
@@ -319,6 +330,7 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
         extra_documents=evidence_context["extra_documents"],
         enable_financial_web=not args.skip_financial_web,
         company_profile_source=args.company_profile_source,
+        retrieval_backend=args.retrieval_backend,
     )
 
     report_data = _attach_evidence_store(report.to_dict(), evidence_context["store"])
@@ -486,7 +498,11 @@ def _build_evidence_context(
                 ),
             )
             _emit_run_event(out_dir, "stage", "工具检索 Agent", "正在补充本地和网页证据")
-            tool_result_obj = agent.run(_prebuild_tool_agent_question(args, query_expansion))
+            tool_result_obj = agent.run(
+                _prebuild_tool_agent_question(args, query_expansion),
+                target_name=(query_expansion.company_names or [""])[0],
+                target_ticker=(query_expansion.tickers or [""])[0],
+            )
             tool_result = tool_result_obj.to_dict()
             extra_documents = _tool_result_to_documents(tool_result)
             tool_path = out_dir / "tool_research_agent.json"
@@ -540,6 +556,8 @@ def _build_evidence_context(
 def _prebuild_tool_agent_question(args: argparse.Namespace, query_expansion: QueryExpansion) -> str:
     research_type = _effective_research_type(args, query_expansion)
     corrected = query_expansion.corrected_query or args.topic
+    target_name = (query_expansion.company_names or [corrected])[0]
+    target_ticker = (query_expansion.tickers or [""])[0]
     keywords = ", ".join(query_expansion.search_keywords[:12])
     crawl_keywords = ", ".join(query_expansion.crawl_keywords[:12])
     if research_type == "industry-chain":
@@ -556,6 +574,8 @@ def _prebuild_tool_agent_question(args: argparse.Namespace, query_expansion: Que
     return (
         f"Research question: {corrected}\n"
         f"Type: company.\n"
+        f"Target company: {target_name}\n"
+        f"Ticker: {target_ticker or 'unknown'}\n"
         f"Search keywords: {keywords}\n"
         f"Crawl keywords: {crawl_keywords}\n"
         "Collect only evidence useful for a company research report: recent news, announcements, financial metrics, "
@@ -600,6 +620,7 @@ def _attach_evidence_store(report_data: dict, evidence_store: dict) -> dict:
     tool_research = evidence_store.get("tool_research") or {}
     attached = {
         **report_data,
+        "research_type": evidence_store.get("research_type") or "company",
         "evidence_store": evidence_store,
         "tool_research": tool_research,
     }
@@ -967,7 +988,7 @@ def _apply_report_quality_agent(
     report_data: dict | None = None,
 ) -> str:
     if args.skip_report_check:
-        return markdown
+        return _strip_excluded_report_sections(markdown)
     checked_markdown, audit = run_report_quality_agent(
         topic=args.topic,
         markdown=markdown,
@@ -979,7 +1000,105 @@ def _apply_report_quality_agent(
     print(f"Report Quality Audit: {audit_path}")
     if audit.needs_supplement:
         print(f"Report Quality Agent: found {len(audit.issues)} issue(s), supplemental docs={len(audit.supplemental_documents)}")
-    return checked_markdown
+    return _strip_excluded_report_sections(checked_markdown)
+
+
+def _strip_excluded_report_sections(markdown: str) -> str:
+    """Remove excluded sections and internal missing-data placeholders from public reports."""
+    kept: list[str] = []
+    skipping = False
+    for line in (markdown or "").splitlines():
+        if re.match(r"^##\s*(?:7[.、]\s*)?估值分析\s*$", line.strip()):
+            skipping = True
+            continue
+        if skipping and re.match(r"^##\s+", line):
+            skipping = False
+        if not skipping:
+            kept.append(line)
+    return _remove_missing_data_content("\n".join(kept))
+
+
+def _remove_missing_data_content(markdown: str) -> str:
+    """Hide unsupported prose while retaining factual report rows and audit JSON."""
+    markers = (
+        "数据缺口",
+        "待补数据",
+        "待补证据",
+        "暂无数据",
+        "无直接证据",
+        "暂未获得",
+        "投资六维分析表",
+        "六维跟踪指标表",
+    )
+    output: list[str] = []
+    lines = (markdown or "").splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.lstrip().startswith("|") and index + 1 < len(lines) and "|" in lines[index + 1]:
+            table_lines = [line]
+            index += 1
+            while index < len(lines) and lines[index].lstrip().startswith("|"):
+                table_lines.append(lines[index])
+                index += 1
+            output.extend(_remove_gap_columns_from_table(table_lines, markers))
+            continue
+        if not any(marker in line for marker in markers):
+            output.append(line)
+        index += 1
+    return _remove_empty_markdown_sections(output)
+
+
+def _remove_empty_markdown_sections(lines: list[str]) -> str:
+    """Drop headings left empty after unsupported rows and prose are removed."""
+    current = list(lines)
+    for level in (3, 2):
+        header = re.compile(rf"^#{{{level}}}\s+")
+        next_header = re.compile(rf"^#{{1,{level}}}\s+")
+        cleaned: list[str] = []
+        index = 0
+        while index < len(current):
+            if not header.match(current[index]):
+                cleaned.append(current[index])
+                index += 1
+                continue
+            end = index + 1
+            while end < len(current) and not next_header.match(current[end]):
+                end += 1
+            body = current[index + 1 : end]
+            meaningful = any(
+                item.strip()
+                and item.strip() != "---"
+                and not re.fullmatch(r"\|?\s*:?-{3,}:?(?:\s*\|\s*:?-{3,}:?)*\s*\|?", item.strip())
+                for item in body
+            )
+            if meaningful:
+                cleaned.extend(current[index:end])
+            index = end
+        current = cleaned
+    return "\n".join(current).strip() + "\n"
+
+
+def _remove_gap_columns_from_table(table_lines: list[str], markers: tuple[str, ...]) -> list[str]:
+    def cells(row: str) -> list[str]:
+        return [cell.strip() for cell in row.strip().strip("|").split("|")]
+
+    rows = [cells(row) for row in table_lines]
+    if len(rows) < 3:
+        return table_lines
+    table_text = " ".join(" ".join(row) for row in rows)
+    if all(token in table_text for token in ("技术", "资金", "基本", "产业", "政策")):
+        return []
+    retained = [idx for idx, header in enumerate(rows[0]) if not any(marker in header for marker in markers)]
+    if not retained:
+        return []
+    rendered: list[str] = []
+    for row_index, row in enumerate(rows):
+        selected = [row[idx] if idx < len(row) else "" for idx in retained]
+        if row_index >= 2 and any(any(marker in cell for marker in markers) for cell in selected):
+            continue
+        rendered.append("| " + " | ".join(selected) + " |")
+    return rendered if len(rendered) >= 3 else []
 
 
 def _prepend_lead_markdown(lead_markdown: str, markdown: str) -> str:

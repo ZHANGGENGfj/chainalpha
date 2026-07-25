@@ -431,17 +431,11 @@ def _apply_conclusion_gate(markdown: str, audit: ReportQualityAudit) -> str:
         return markdown
     if audit.gate_status == "caution" and audit.conclusion_policy.startswith("解释型回答"):
         return markdown
-    checked = _demote_strong_phrases(markdown) if audit.gate_status == "block_strong_conclusion" else markdown
-    notice = (
-        f"> 质量闸门：{audit.gate_status}。{audit.conclusion_policy}"
-        " 下文若出现评级、目标价、确定性或显著受益等表述，应按待验证研究假设阅读，不构成投资建议。"
-    )
-    if "质量闸门：" in checked[:500]:
-        return checked
-    lines = checked.splitlines()
-    if lines and lines[0].startswith("#"):
-        return "\n".join([lines[0], "", notice, *lines[1:]])
-    return f"{notice}\n\n{checked}"
+    # The audit remains available in report_quality_audit.json.  The reader
+    # should see a clean report, not internal gate and retrieval instructions.
+    if audit.gate_status == "block_strong_conclusion":
+        return _demote_strong_phrases(markdown)
+    return markdown
 
 
 def _has_strong_conclusion(markdown: str) -> bool:
@@ -535,70 +529,9 @@ def _fetch_supplemental_documents(queries: list[str], *, limit: int) -> tuple[li
 
 
 def _append_quality_agent_addendum(markdown: str, audit: ReportQualityAudit) -> str:
-    lines = [
-        markdown.rstrip(),
-        "",
-        "---",
-        "",
-        "## 报告质量闸门：证据强度与结论边界",
-        "",
-        f"- 闸门状态：{audit.gate_status}",
-        f"- 结论边界：{audit.conclusion_policy}",
-        (
-            "- 证据统计："
-            f"共 {audit.evidence_summary.total} 条；高置信度 {audit.evidence_summary.high} 条；"
-            f"中置信度 {audit.evidence_summary.medium} 条；低置信度 {audit.evidence_summary.low} 条；"
-            f"标明来源 {audit.evidence_summary.sourced} 条。"
-        ),
-        "",
-        "### 证据台账",
-        "",
-        "| 编号 | 证据/事实 | 来源 | 置信度 | 说明 |",
-        "|---:|---|---|---|---|",
-    ]
-    if audit.evidence_items:
-        for idx, item in enumerate(audit.evidence_items[:25], 1):
-            source = _compact(item.source or item.url or "未标明来源", limit=60)
-            if item.url and item.url not in source:
-                source = f"{source} ({_compact(item.url, limit=60)})"
-            lines.append(
-                f"| {idx} | {_md_cell(item.claim)} | {_md_cell(source)} | {item.confidence} | {_md_cell(item.reason)} |"
-            )
-    else:
-        lines.append("| 1 | 未抽取到结构化证据 | 未标明来源 | low | 当前报告只能作为待核验线索。 |")
-
-    lines.extend(["", "### 发现的问题"])
-    if audit.issues:
-        for issue in audit.issues:
-            lines.append(f"- [{issue.severity}] {issue.category}: {issue.message}")
-    else:
-        lines.append("- 未发现需要阻断结论的质量问题。")
-
-    lines.extend(["", "### 补充检索词"])
-    if audit.supplement_queries:
-        for query in audit.supplement_queries:
-            lines.append(f"- {query}")
-    else:
-        lines.append("- 暂无。")
-
-    lines.extend(["", "### 补充网页证据"])
-    if audit.supplemental_documents:
-        for idx, doc in enumerate(audit.supplemental_documents[:10], 1):
-            title = doc.get("title") or "-"
-            source = doc.get("source") or "-"
-            url = doc.get("url") or "-"
-            excerpt = str(doc.get("content") or "").replace("\n", " ")[:180]
-            lines.append(f"{idx}. {title} | {source} | {url} | confidence=medium")
-            if excerpt:
-                lines.append(f"   - 摘要：{excerpt}")
-    else:
-        lines.append("- 未抓取到补充网页证据；请检查网络、代理或手动提供公告、财报、研报材料。")
-
-    if audit.warnings:
-        lines.extend(["", "### 检索警告"])
-        for item in audit.warnings:
-            lines.append(f"- {item}")
-    return "\n".join(lines).strip() + "\n"
+    """Keep audit details in JSON instead of appending internal notes to reports."""
+    del audit
+    return markdown.rstrip() + "\n"
 
 
 def _target_name(topic: str, report_data: dict[str, Any] | None) -> str:
