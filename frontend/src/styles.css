@@ -41,6 +41,10 @@ button {
   overflow: hidden;
 }
 
+.app-shell.research-sidebar-collapsed {
+  grid-template-columns: 68px minmax(0, 1fr);
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;
@@ -57,6 +61,71 @@ button {
   justify-content: space-between;
   min-height: 40px;
   padding: 0 4px;
+}
+
+.research-brand {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+}
+
+.research-brand > span {
+  display: grid;
+  min-width: 0;
+}
+
+.research-brand strong {
+  font-size: 13px;
+}
+
+.research-brand small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.research-nav {
+  display: grid;
+  gap: 3px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 9px;
+}
+
+.research-nav a {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  min-height: 34px;
+  border-radius: 7px;
+  color: #505a6b;
+  text-decoration: none;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+.research-nav a:hover,
+.research-nav a.active {
+  background: #eaf1ff;
+  color: #245fcc;
+}
+
+.app-shell.research-sidebar-collapsed .research-brand > span,
+.app-shell.research-sidebar-collapsed .research-nav a span,
+.app-shell.research-sidebar-collapsed .side-action,
+.app-shell.research-sidebar-collapsed .history-group,
+.app-shell.research-sidebar-collapsed .sidebar-foot {
+  display: none;
+}
+
+.app-shell.research-sidebar-collapsed .research-nav a {
+  grid-template-columns: 24px;
+  justify-content: center;
+  padding: 0;
+}
+
+.app-shell.research-sidebar-collapsed .sidebar-top {
+  flex-direction: column;
+  gap: 8px;
 }
 
 .logo {

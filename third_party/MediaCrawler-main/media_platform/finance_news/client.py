@@ -83,19 +83,35 @@ class FinanceNewsClient:
         self.browser_context = browser_context
 
     async def fetch_all_news(self, *, limit_per_source: int = 80, keywords: list[str] | None = None) -> List[Dict[str, Any]]:
-        results: list[dict[str, Any]] = []
         keyword_list = [keyword.strip() for keyword in keywords or [] if keyword and keyword.strip()]
-        for source in self.SOURCES:
-            try:
-                if keyword_list:
-                    rows = await self.search_source_news(source, keywords=keyword_list, limit=limit_per_source)
-                else:
-                    rows = await self.fetch_source_news(source, limit=limit_per_source)
-                utils.logger.info(f"[FinanceNews] {source['name']} fetched {len(rows)} items")
-                results.extend(rows)
-            except Exception as exc:
-                utils.logger.warning(f"[FinanceNews] {source['name']} fetch failed: {type(exc).__name__}: {exc}")
-            await asyncio.sleep(1.5)
+        semaphore = asyncio.Semaphore(3)
+
+        async def fetch_one(source: dict[str, Any]) -> list[dict[str, Any]]:
+            async with semaphore:
+                try:
+                    if keyword_list:
+                        rows = await self.search_source_news(
+                            source,
+                            keywords=keyword_list,
+                            limit=limit_per_source,
+                        )
+                    else:
+                        rows = await self.fetch_source_news(source, limit=limit_per_source)
+                    utils.logger.info(f"[FinanceNews] {source['name']} fetched {len(rows)} items")
+                    return rows
+                except Exception as exc:
+                    utils.logger.warning(
+                        f"[FinanceNews] {source['name']} fetch failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    return []
+                finally:
+                    await asyncio.sleep(1.5)
+
+        batches = await asyncio.gather(*(fetch_one(source) for source in self.SOURCES))
+        results: list[dict[str, Any]] = []
+        for rows in batches:
+            results.extend(rows)
         return results
 
     async def search_source_news(self, source: dict[str, Any], *, keywords: list[str], limit: int) -> List[Dict[str, Any]]:

@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -29,8 +28,8 @@ from chainalpha.investment.llm_reply import (
     generate_topic_reply,
     render_topic_reply,
 )
-from chainalpha.investment.evidence_pack import build_professional_evidence_pack
-from chainalpha.investment.agent_pipeline import (
+from chainalpha.reports.evidence_pack import build_professional_evidence_pack
+from chainalpha.workflows.five_agent_research import (
     build_five_agent_research_report,
     render_five_agent_markdown,
 )
@@ -40,16 +39,20 @@ from chainalpha.investment.chain_visual import (
     save_chain_visual_outputs,
 )
 from chainalpha.investment.query_expansion import QueryExpansion, expand_user_query
-from chainalpha.investment.report_quality_agent import run_report_quality_agent
+from chainalpha.quality.report_quality_agent import run_report_quality_agent
 from chainalpha.investment.report_extractors import load_local_report_summaries
-from chainalpha.investment.topic_report import (
+from chainalpha.reports.company_report import (
     build_topic_research_report,
     render_professional_topic_report,
     render_topic_research_markdown,
 )
-from chainalpha.investment.tool_research_agent import LangGraphResearchAgent
+from chainalpha.workflows.company_evidence_research import (
+    CompanyEvidenceResearchRequest,
+    run_company_evidence_research,
+)
 from chainalpha.config import load_settings
-from chainalpha.connectors.base import SourceDocument, build_source_document
+from chainalpha.connectors.base import SourceDocument
+from chainalpha.memory.research_memory import ResearchMemoryContext, ResearchMemoryService
 from chainalpha.nlp.llm_client import llm_stream_events
 from chainalpha.reports.html_renderer import render_markdown_html
 
@@ -76,34 +79,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-refresh-news",
         action="store_true",
-        help="Do not trigger MediaCrawler targeted collection before topic analysis.",
-    )
-    parser.add_argument(
-        "--require-refresh-news",
-        action="store_true",
-        help="Fail the run when MediaCrawler targeted collection fails.",
-    )
-    parser.add_argument(
-        "--media-crawler-python",
-        default=sys.executable,
-        help="Python executable used to run MediaCrawler scripts.",
-    )
-    parser.add_argument(
-        "--media-crawler-timeout",
-        type=int,
-        default=90,
-        help="Seconds to wait for each MediaCrawler platform before continuing to the next one.",
-    )
-    parser.add_argument(
-        "--crawl-sources",
-        default="",
-        help="Reserved for targeted collector. MediaCrawler main.py finance_news currently uses its built-in source list.",
-    )
-    parser.add_argument(
-        "--crawl-limit-per-source",
-        type=int,
-        default=80,
-        help="Reserved for targeted collector. MediaCrawler main.py finance_news currently uses its internal limit.",
+        help="Disable Runtime Skill on-demand MediaCrawler collection for this run.",
     )
     parser.add_argument("--company-map", type=Path, default=Path("./configs/company_map.yaml"), help="Company mapping YAML.")
     parser.add_argument(
@@ -156,9 +132,16 @@ def parse_args() -> argparse.Namespace:
         "--tool-agent-iterations",
         type=int,
         default=0,
-        help="Deprecated compatibility option. Tool search now stops when evidence coverage is complete or exhausted.",
+        help="Safety cap for Skill/tool iterations; 0 uses 10. Search still stops early when evidence is covered or tools are exhausted.",
     )
     parser.add_argument("--tool-agent-top-k", type=int, default=6, help="Maximum documents per LangGraph tool call.")
+    parser.add_argument("--runtime-skill-root", type=Path, default=Path(os.getenv("CHAINALPHA_SKILL_ROOT", "./skills")), help="Runtime financial Skill directory.")
+    parser.add_argument("--agent-state-dir", type=Path, default=Path(os.getenv("CHAINALPHA_AGENT_STATE_DIR", "./data/agent_states")), help="Persistent Agent state snapshots.")
+    parser.add_argument("--tool-performance-path", type=Path, default=Path(os.getenv("CHAINALPHA_TOOL_PERFORMANCE_PATH", "./data/agent/tool_performance.json")), help="Learned tool outcome statistics.")
+    parser.add_argument("--research-evidence-memory-path", type=Path, default=Path(os.getenv("CHAINALPHA_EVIDENCE_MEMORY_PATH", "./data/research_memory/evidence.sqlite3")), help="Point-in-time research evidence memory.")
+    parser.add_argument("--skip-preference-memory", action="store_true", help="Disable Mem0 user-preference recall and writing for this run.")
+    parser.add_argument("--memory-user-id", default="local_user", help="Stable user scope for preference memory. Use an authenticated user ID in production.")
+    parser.add_argument("--memory-session-id", default="", help="Optional chat session ID stored only as preference-memory metadata.")
     parser.add_argument("--broker-name", default="", help="Optional broker/institution name shown at the top of generated HTML reports.")
     parser.add_argument("--broker-logo", default="", help="Optional broker/institution logo path or URL shown at the top of generated HTML reports.")
     return parser.parse_args()
@@ -292,23 +275,48 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
     print(f"Research type: {_effective_research_type(args, query_expansion)} | topic_class={query_expansion.topic_class}", flush=True)
     print(f"Query expansion JSON: {query_expansion_path}", flush=True)
 
-    refresh_result = None
-    if not args.skip_refresh_news:
-        _emit_run_event(out_dir, "stage", "MediaCrawler 刷新", "正在按关键词刷新本地新闻库")
-        refresh_result = refresh_mediacrawler_news(args, out_dir, media_data_root, query_expansion)
-        if refresh_result:
-            metadata_path = out_dir / "media_crawler_refresh.json"
-            metadata_path.write_text(json.dumps(refresh_result, ensure_ascii=False, indent=2), encoding="utf-8")
-            _emit_run_event(
-                out_dir,
-                "crawler",
-                "MediaCrawler 刷新完成",
-                f"ok={refresh_result.get('ok')} keywords={', '.join((refresh_result.get('keywords') or [])[:8])}",
-                {"refresh": _trim_event_data(refresh_result, max_text=1200)},
-            )
-            print(f"MediaCrawler refresh metadata: {metadata_path}", flush=True)
+    preference_context = ResearchMemoryContext(False, [], "preference memory disabled")
+    preference_write: dict[str, object] = {"ok": False, "skipped": True}
+    if not args.skip_preference_memory:
+        preference_memory = ResearchMemoryService(load_settings(), user_id=args.memory_user_id)
+        preference_write = preference_memory.remember_from_query(args.topic, session_id=args.memory_session_id)
+        preference_context = preference_memory.recall(
+            f"用户报告偏好与写作要求：{query_expansion.corrected_query or args.topic}"
+        )
+        if preference_context.available and preference_context.items:
+            print(f"Preference memory: recalled {len(preference_context.items)} item(s)", flush=True)
+        elif preference_context.warning:
+            print(f"Preference memory: {preference_context.warning}", flush=True)
 
-    evidence_context = _build_evidence_context(args, out_dir, media_data_root, query_expansion, refresh_result)
+    # On-demand collection belongs to the research loop. The agent checks the
+    # local library and evidence memory first, then invokes MediaCrawler only
+    # for an uncovered, time-sensitive Skill capability. The independent
+    # background market collector can continue writing to the same data store.
+    refresh_result = {
+        "mode": "skill_delegated" if not args.skip_refresh_news else "disabled",
+        "targeted_crawl_enabled": not args.skip_refresh_news,
+        "message": (
+            "Runtime Skill will invoke MediaCrawler only when local evidence is insufficient."
+            if not args.skip_refresh_news
+            else "On-demand MediaCrawler collection is disabled for this run."
+        ),
+    }
+    _emit_run_event(
+        out_dir,
+        "stage",
+        "按需信息收集",
+        refresh_result["message"],
+        {"collection": refresh_result},
+    )
+
+    evidence_context = _build_evidence_context(
+        args,
+        out_dir,
+        media_data_root,
+        query_expansion,
+        refresh_result,
+        preference_context=preference_context,
+    )
 
     _emit_run_event(out_dir, "stage", "研究底稿构建", "正在基于统一证据层生成 topic_research.json")
     report = build_topic_research_report(
@@ -334,6 +342,11 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
     )
 
     report_data = _attach_evidence_store(report.to_dict(), evidence_context["store"])
+    report_data["user_preference_memory"] = {
+        **preference_context.to_dict(),
+        "write": preference_write,
+        "policy": "User preferences are writing instructions, not investment evidence.",
+    }
     report_json = out_dir / "topic_research.json"
     report_json.write_text(json.dumps(report_data, ensure_ascii=False, indent=2), encoding="utf-8")
     _emit_run_event(
@@ -473,6 +486,8 @@ def _build_evidence_context(
     media_data_root: Path,
     query_expansion: QueryExpansion,
     refresh_result: dict | None,
+    *,
+    preference_context: ResearchMemoryContext | None = None,
 ) -> dict:
     """Build the evidence layer before deterministic research construction."""
 
@@ -481,39 +496,63 @@ def _build_evidence_context(
     extra_documents: list[SourceDocument] = []
     if not args.skip_tool_agent:
         try:
-            settings = load_settings()
-            agent = LangGraphResearchAgent(
-                settings,
-                media_crawler_root=media_data_root,
-                enable_local_search=True,
-                enable_web_search=not args.skip_tool_agent_web,
-                top_k=args.tool_agent_top_k,
-                max_iterations=args.tool_agent_iterations,
-                progress_callback=lambda event: _emit_run_event(
-                    out_dir,
-                    str(event.get("type") or "tool"),
-                    str(event.get("title") or "工具检索"),
-                    str(event.get("message") or ""),
-                    {key: value for key, value in event.items() if key not in {"type", "title", "message"}},
-                ),
-            )
             _emit_run_event(out_dir, "stage", "工具检索 Agent", "正在补充本地和网页证据")
-            tool_result_obj = agent.run(
-                _prebuild_tool_agent_question(args, query_expansion),
-                target_name=(query_expansion.company_names or [""])[0],
-                target_ticker=(query_expansion.tickers or [""])[0],
+            preference_text = preference_context.prompt_context() if preference_context else ""
+            workflow_result = run_company_evidence_research(
+                CompanyEvidenceResearchRequest(
+                    settings=load_settings(),
+                    question=query_expansion.corrected_query or args.topic,
+                    research_type=_effective_research_type(args, query_expansion),
+                    target_name=(query_expansion.company_names or [query_expansion.corrected_query or args.topic])[0],
+                    target_ticker=(query_expansion.tickers or [""])[0],
+                    search_keywords=list(query_expansion.search_keywords),
+                    crawl_keywords=list(query_expansion.crawl_keywords),
+                    media_crawler_root=media_data_root,
+                    enable_web_search=not args.skip_tool_agent_web,
+                    enable_targeted_crawl=not args.skip_refresh_news,
+                    top_k=args.tool_agent_top_k,
+                    max_iterations=args.tool_agent_iterations,
+                    skill_root=args.runtime_skill_root,
+                    state_path=args.agent_state_dir / f"{out_dir.name}.json",
+                    performance_path=args.tool_performance_path,
+                    evidence_memory_path=args.research_evidence_memory_path,
+                    preference_context=preference_text,
+                    progress_callback=lambda event: _emit_run_event(
+                        out_dir,
+                        str(event.get("type") or "tool"),
+                        str(event.get("title") or "tool research"),
+                        str(event.get("message") or ""),
+                        {key: value for key, value in event.items() if key not in {"type", "title", "message"}},
+                    ),
+                )
             )
-            tool_result = tool_result_obj.to_dict()
-            extra_documents = _tool_result_to_documents(tool_result)
+            tool_result = workflow_result.tool_research
+            extra_documents = workflow_result.documents
             tool_path = out_dir / "tool_research_agent.json"
             tool_path.write_text(json.dumps(tool_result, ensure_ascii=False, indent=2), encoding="utf-8")
+            task_tree_path = out_dir / "research_task_tree.json"
+            task_tree_path.write_text(
+                json.dumps(
+                    {
+                        "question": query_expansion.corrected_query or args.topic,
+                        "research_type": _effective_research_type(args, query_expansion),
+                        "tasks": workflow_result.task_tree,
+                        "coverage": workflow_result.coverage,
+                        "tool_trace": tool_result.get("steps") or [],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
             print(
-                f"LangGraph Tool Agent: framework={tool_result_obj.framework}, "
-                f"steps={len(tool_result_obj.steps)}, evidence={len(tool_result_obj.evidence)}, "
+                f"LangGraph Tool Agent: framework={workflow_result.framework}, "
+                f"steps={workflow_result.step_count}, evidence={len(tool_result.get('evidence') or [])}, "
                 f"injected_docs={len(extra_documents)}",
                 flush=True,
             )
             print(f"LangGraph Tool Agent JSON: {tool_path}", flush=True)
+            print(f"Research Task Tree JSON: {task_tree_path}", flush=True)
         except Exception as exc:  # noqa: BLE001
             tool_warning = f"LangGraph tool research failed before research build: {type(exc).__name__}: {exc}"
             print(tool_warning, flush=True)
@@ -551,69 +590,6 @@ def _build_evidence_context(
     )
     print(f"Evidence Store JSON: {evidence_path}", flush=True)
     return {"store": evidence_store, "extra_documents": extra_documents}
-
-
-def _prebuild_tool_agent_question(args: argparse.Namespace, query_expansion: QueryExpansion) -> str:
-    research_type = _effective_research_type(args, query_expansion)
-    corrected = query_expansion.corrected_query or args.topic
-    target_name = (query_expansion.company_names or [corrected])[0]
-    target_ticker = (query_expansion.tickers or [""])[0]
-    keywords = ", ".join(query_expansion.search_keywords[:12])
-    crawl_keywords = ", ".join(query_expansion.crawl_keywords[:12])
-    if research_type == "industry-chain":
-        return (
-            f"Research question: {corrected}\n"
-            f"Type: industry-chain.\n"
-            f"Search keywords: {keywords}\n"
-            f"Crawl keywords: {crawl_keywords}\n"
-            "Collect only evidence useful for an upstream-to-downstream industry-chain report: "
-            "core materials/components, bottleneck links, capacity constraints, value transfer, "
-            "representative companies, policy, price/supply-demand signals, risks, and falsification indicators. "
-            "Prefer local MediaCrawler evidence first, then public finance web pages if local evidence is insufficient."
-        )
-    return (
-        f"Research question: {corrected}\n"
-        f"Type: company.\n"
-        f"Target company: {target_name}\n"
-        f"Ticker: {target_ticker or 'unknown'}\n"
-        f"Search keywords: {keywords}\n"
-        f"Crawl keywords: {crawl_keywords}\n"
-        "Collect only evidence useful for a company research report: recent news, announcements, financial metrics, "
-        "valuation metrics, stock performance, fund flow, institutional holdings, catalysts, risks, and falsification indicators. "
-        "Prefer local MediaCrawler evidence first, then public finance web pages if local evidence is insufficient."
-    )
-
-
-def _tool_result_to_documents(tool_result: dict) -> list[SourceDocument]:
-    docs: list[SourceDocument] = []
-    seen: set[str] = set()
-    for item in tool_result.get("evidence") or []:
-        if not isinstance(item, dict):
-            continue
-        title = str(item.get("title") or "Tool research evidence").strip()
-        content = str(item.get("content_excerpt") or item.get("content") or "").strip()
-        url = item.get("url")
-        path = item.get("path")
-        key = str(url or path or title)
-        if not content or key in seen:
-            continue
-        seen.add(key)
-        docs.append(
-            build_source_document(
-                source=str(item.get("source") or "langgraph_tool_agent"),
-                source_type=str(item.get("source_type") or "tool_research"),
-                title=title,
-                content=content,
-                url=str(url) if url else None,
-                path=str(path) if path else None,
-                metadata={
-                    "platform": "langgraph_tool_agent",
-                    "record": item,
-                    "evidence_store": True,
-                },
-            )
-        )
-    return docs
 
 
 def _attach_evidence_store(report_data: dict, evidence_store: dict) -> dict:
@@ -685,77 +661,6 @@ def _trim_event_data(value, *, max_text: int = 800):
     return value
 
 
-def _augment_report_with_tool_agent(
-    args: argparse.Namespace,
-    out_dir: Path,
-    report_data: dict,
-    media_data_root: Path,
-) -> dict:
-    """Run the LangGraph tool-use research loop inside the normal report flow."""
-
-    if args.skip_tool_agent:
-        return report_data
-    if args.daily_scan:
-        return report_data
-
-    question = _tool_agent_question(args, report_data)
-    try:
-        settings = load_settings()
-        agent = LangGraphResearchAgent(
-            settings,
-            media_crawler_root=media_data_root,
-            enable_local_search=True,
-            enable_web_search=not args.skip_tool_agent_web,
-            top_k=args.tool_agent_top_k,
-            max_iterations=args.tool_agent_iterations,
-        )
-        result = agent.run(question)
-    except Exception as exc:  # noqa: BLE001
-        warning = f"LangGraph tool research failed: {type(exc).__name__}: {exc}"
-        print(warning, flush=True)
-        return {**report_data, "tool_research_warning": warning}
-
-    result_dict = result.to_dict()
-    tool_path = out_dir / "tool_research_agent.json"
-    tool_path.write_text(json.dumps(result_dict, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(
-        f"LangGraph Tool Agent: framework={result.framework}, "
-        f"steps={len(result.steps)}, evidence={len(result.evidence)}",
-        flush=True,
-    )
-    print(f"LangGraph Tool Agent JSON: {tool_path}", flush=True)
-    return {
-        **report_data,
-        "tool_research": result_dict,
-    }
-
-
-def _tool_agent_question(args: argparse.Namespace, report_data: dict) -> str:
-    topic = str(report_data.get("topic") or args.topic)
-    companies = report_data.get("companies") or []
-    company = {}
-    if companies and isinstance(companies[0], dict):
-        company = companies[0].get("company") or {}
-    target = company.get("name") or (report_data.get("intent") or {}).get("target") or topic
-    research_type = args.research_type
-    if research_type == "auto":
-        query_expansion = report_data.get("query_expansion") or {}
-        if query_expansion.get("topic_class") in {"raw_material_chain", "component_chain", "industry_chain"}:
-            research_type = "industry-chain"
-        else:
-            research_type = "company"
-    if research_type == "industry-chain":
-        return (
-            f"围绕“{topic}”补充产业链投研证据：上游原料、关键部件、产能约束、价格/供需、"
-            "代表公司、政策、风险和证伪条件。优先查本地新闻库，不足时查公开财经网页。"
-        )
-    return (
-        f"围绕“{target}”补充公司投研证据：近期新闻、公告、财报、PE/PB/PS、历史估值、"
-        "股价区间表现、主力资金、北向资金、两融、机构持仓、风险和证伪条件。"
-        "优先查本地新闻库，不足时查公开财经网页。"
-    )
-
-
 def _apply_research_type_override(args: argparse.Namespace, query_expansion: QueryExpansion) -> None:
     if args.research_type == "auto":
         return
@@ -778,207 +683,6 @@ def _effective_research_type(args: argparse.Namespace, query_expansion: QueryExp
     if query_expansion.topic_class in {"raw_material_chain", "component_chain", "industry_chain"}:
         return "industry-chain"
     return "company"
-
-
-def resolve_media_crawler_app_root(data_root: Path) -> Path:
-    return data_root.parent if data_root.name == "data" else data_root
-
-
-def refresh_mediacrawler_news(
-    args: argparse.Namespace,
-    out_dir: Path,
-    data_root: Path,
-    query_expansion: QueryExpansion | None = None,
-) -> dict | None:
-    app_root = resolve_media_crawler_app_root(data_root).resolve()
-    script = (app_root / "main.py").resolve()
-    if not script.exists():
-        message = f"MediaCrawler main script not found: {script}"
-        if args.require_refresh_news:
-            raise SystemExit(message)
-        print(f"[media-crawler] skip refresh: {message}", flush=True)
-        return {"ok": False, "error": message}
-
-    keywords = query_expansion.crawl_keywords if query_expansion else build_crawl_keywords(args.topic)
-    if not keywords:
-        keywords = build_crawl_keywords(args.topic)
-    keywords = build_financial_web_keywords(keywords, args.topic)
-    platforms = ["finance_news"]
-    # main.py / finance_news currently uses the source list inside
-    # media_platform.finance_news.client.FinanceNewsClient. --crawl-sources is
-    # kept for the older targeted collector and future source filtering.
-    _ = args.crawl_sources
-    _ = args.crawl_limit_per_source
-
-    results: list[dict] = []
-    all_ok = True
-    for platform in platforms:
-        command = [
-            args.media_crawler_python,
-            str(script),
-            "--platform",
-            platform,
-            "--type",
-            "search",
-            "--keywords",
-            ",".join(keywords),
-            "--save_data_option",
-            "jsonl",
-            "--headless",
-            "true",
-        ]
-        print(f"[media-crawler] running main.py {platform} for: {', '.join(keywords)}", flush=True)
-        try:
-            result = subprocess.run(
-                command,
-                cwd=app_root,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                env=child_env(),
-                timeout=args.media_crawler_timeout,
-            )
-            output = result.stdout + "\n" + result.stderr
-            returncode = result.returncode
-            ok = returncode == 0
-            stdout = result.stdout
-            stderr = result.stderr
-        except subprocess.TimeoutExpired as exc:
-            stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-            stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
-            output = stdout + "\n" + stderr
-            returncode = -1
-            ok = False
-            output = f"MediaCrawler platform timed out after {args.media_crawler_timeout}s.\n{output}"
-        all_ok = all_ok and ok
-        if not ok:
-            print(f"[media-crawler] {platform} refresh failed, continue with local data: {output.strip()[:800]}", flush=True)
-        else:
-            print(f"[media-crawler] {platform} refresh done: saved under {data_root / platform}", flush=True)
-        results.append(
-            {
-                "platform": platform,
-                "ok": ok,
-                "returncode": returncode,
-                "keywords": keywords,
-                "command": command,
-                "data_dir": str(data_root / platform),
-                "parsed": parse_key_value_output(output),
-                "stdout": stdout,
-                "stderr": stderr,
-            }
-        )
-
-    if not all_ok and args.require_refresh_news:
-        failed = [item["platform"] for item in results if not item["ok"]]
-        raise SystemExit(f"MediaCrawler collection failed for: {', '.join(failed)}")
-
-    return {
-        "ok": all_ok,
-        "keywords": keywords,
-        "data_root": str(data_root),
-        "platforms": results,
-    }
-
-
-def build_crawl_keywords(topic: str) -> list[str]:
-    terms = [item.strip() for item in re.split(r"[,，;；\s]+", topic) if item.strip()]
-    if topic.strip() and topic.strip() not in terms:
-        terms.insert(0, topic.strip())
-    return list(dict.fromkeys(terms))[:8]
-
-
-def build_financial_web_keywords(base_keywords: list[str], topic: str) -> list[str]:
-    company = _keyword_subject(base_keywords, topic)
-    if _looks_like_material_topic(topic, company):
-        financial_terms = [
-            f"{company} 价格",
-            f"{company} 供需",
-            f"{company} 产能",
-            f"{company} 市场空间",
-            f"{company} 产业链",
-            f"{company} 上市公司",
-        ]
-    else:
-        financial_terms = [
-            f"{company} 财报分析",
-            f"{company} 年报 营业收入 毛利率",
-            f"{company} 经营现金流 存货 应收账款",
-            f"{company} 研发费用 资本开支",
-        ]
-    useful_base = [item for item in base_keywords if not _is_generic_crawl_word(item)]
-    return list(dict.fromkeys([*useful_base[:12], *financial_terms]))[:16]
-
-
-def _keyword_subject(base_keywords: list[str], topic: str) -> str:
-    for item in base_keywords:
-        clean = _strip_question_suffix_for_keyword(item)
-        if _is_generic_crawl_word(clean):
-            continue
-        if any(ch.isdigit() for ch in clean) and len(clean) <= 10:
-            continue
-        if 1 < len(clean) <= 16 and " " not in clean:
-            return clean
-    clean_topic = _strip_question_suffix_for_keyword(topic)
-    return clean_topic or topic.strip()
-
-
-def _strip_question_suffix_for_keyword(value: str) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    text = re.split(
-        r"(是什么东西|是什么|怎么样|如何|怎么看|有前景吗|有没有前景|有前景|前景如何|值得投资吗|能买吗|好不好)",
-        text,
-        maxsplit=1,
-    )[0].strip(" ，,。？?！!")
-    patterns = [
-        r"(怎么样|如何|怎么看|能买吗|值得买吗|值得投资吗|有没有机会|好不好|行不行)[？?。!！]*$",
-        r"(是什么|是谁|吗|呢)[？?。!！]*$",
-    ]
-    for pattern in patterns:
-        text = re.sub(pattern, "", text).strip()
-    return text
-
-
-def _is_generic_crawl_word(value: str) -> bool:
-    clean = str(value or "").strip()
-    return clean in {
-        "公告",
-        "财报",
-        "研报",
-        "业绩",
-        "订单",
-        "客户认证",
-        "扩产",
-        "产品进展",
-        "风险",
-        "年报",
-        "季报",
-    }
-
-
-def _looks_like_material_topic(topic: str, subject: str) -> bool:
-    text = f"{topic} {subject}"
-    return any(word in text for word in ["电子布", "原材料", "材料", "原料", "玻纤", "铜箔", "光刻胶", "覆铜板"])
-
-
-def parse_key_value_output(output: str) -> dict[str, str]:
-    parsed: dict[str, str] = {}
-    for line in output.splitlines():
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        parsed[key.strip()] = value.strip()
-    return parsed
-
-
-def child_env() -> dict[str, str]:
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    existing = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = "." if not existing else f".{os.pathsep}{existing}"
-    env.pop("SSLKEYLOGFILE", None)
-    return env
 
 
 def _apply_report_quality_agent(

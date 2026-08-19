@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+
+os.environ.pop("SSLKEYLOGFILE", None)
+
 from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parsedate_to_datetime

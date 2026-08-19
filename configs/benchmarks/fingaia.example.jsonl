@@ -1,0 +1,2 @@
+{"task_id":"demo_qa_001","question":"若营业收入为120亿元、同比增长20%，上年营业收入是多少亿元？","answer":"100亿元","scenario":"FRA","level":"1","attachments":[]}
+{"task_id":"demo_qa_002","question":"某资产价格从80元上涨至100元，涨幅是多少？","answer":{"accepted_answers":["25%","0.25"]},"scenario":"TRA","level":"1","attachments":[]}

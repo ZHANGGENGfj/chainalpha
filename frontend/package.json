@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "python -m http.server 5173 -d ."
+    "dev": "python -m http.server 5173 -d .",
+    "check": "node --check src/app.js && node --check src/authPage.js && node --check src/eventHome.js && node --check src/eventComponents.js && node --check src/eventDetail.js && node --check src/eventService.js && node --check src/followService.js && node --check src/mockEvents.js && node --check src/researchApp.js && node --check src/fiveGoodPage.js && node --check src/fiveGoodComponents.js && node --check src/fiveGoodService.js && node --check src/mocks/fiveGoodMock.js",
+    "test": "node --test tests/eventService.test.js tests/fiveGoodService.test.js",
+    "build": "npm run check && npm test"
   }
 }

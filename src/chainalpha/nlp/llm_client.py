@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Callable, Iterator
 from urllib.parse import urlparse
 
+# Some managed Windows environments inject an unwritable TLS key-log path.
+# urllib3 tries to open it while importing, before any request is made.
+os.environ.pop("SSLKEYLOGFILE", None)
 import requests
 
 from chainalpha.config import Settings

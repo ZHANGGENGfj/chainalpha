@@ -131,7 +131,7 @@ function toUiRun(item) {
 }
 
 async function requestJson(path, options) {
-  const response = await fetch(`${API_BASE}${path}`, options);
+  const response = await fetch(`${API_BASE}${path}`, {...options, credentials: "include"});
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
   }

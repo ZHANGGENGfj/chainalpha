@@ -1,0 +1,77 @@
+name: industry-chain-evidence-research
+description: Collect source-scoped upstream-to-downstream evidence for industry-chain and bottleneck research.
+research_types: [industry-chain]
+source_priority: [regulator, industry_association, mainstream_media, broker_research, company_disclosure]
+sources:
+  - name: local_industry_archive
+    tool: local_search
+    description: Search locally collected industry news, broker reports and disclosures.
+    local_platforms: [finance_news, broker_reports, cninfo_reports, cls, xq]
+  - name: industry_news_crawl
+    tool: targeted_news_crawl
+    description: Run a targeted industry query through MediaCrawler finance news.
+    media_crawler_platform: finance_news
+    local_platforms: [finance_news]
+  - name: domestic_industry_web
+    tool: web_search
+    description: Domestic financial media for capacity, price, supply-demand and listed-company evidence.
+    source_type: mainstream_media
+    search_url_templates:
+      - "https://www.cls.cn/searchPage?keyword={query}"
+      - "https://www.21jingji.com/search?keyword={query}"
+      - "https://search.stcn.com/?keyword={query}"
+      - "https://www.cnstock.com/searchResult?word={query}"
+    allowed_domains: [cls.cn, 21jingji.com, stcn.com, cnstock.com]
+    max_linked_pages_per_query: 3
+    timeout_seconds: 15
+  - name: overseas_industry_web
+    tool: web_search
+    description: Public overseas reporting for global supply-demand, capex and technology-route evidence.
+    source_type: mainstream_media
+    search_url_templates:
+      - "https://www.reuters.com/site-search/?query={query}"
+      - "https://36kr.com/search/articles/{query}"
+    allowed_domains: [reuters.com, 36kr.com]
+    max_linked_pages_per_query: 2
+    timeout_seconds: 15
+capabilities:
+  - name: chain_structure
+    description: Upstream materials, core components, process links and downstream applications.
+    required: true
+    evidence_hints: [上游, 中游, 下游, 原材料, 核心部件, 应用]
+    evidence_groups: [[上游, 中游, 下游], [原材料, 核心部件, 应用]]
+    query_templates: ["{question} 上游 中游 下游 原材料 核心部件 应用"]
+    tools: [local_search, targeted_news_crawl, web_search]
+    source_profiles: [local_industry_archive, industry_news_crawl, domestic_industry_web]
+  - name: capacity_constraints
+    description: Capacity, utilisation, certification, yield and expansion-cycle evidence.
+    required: true
+    evidence_hints: [产能, 扩产, 供给, 良率, 认证, 利用率]
+    evidence_groups: [[产能, 扩产, 供给], [良率, 认证, 利用率]]
+    query_templates: ["{question} 产能 扩产 供给 良率 认证 产能利用率"]
+    tools: [local_search, targeted_news_crawl, web_search]
+    source_profiles: [local_industry_archive, industry_news_crawl, domestic_industry_web]
+  - name: supply_demand_price
+    description: Supply-demand, price, inventory and downstream capex evidence.
+    required: true
+    evidence_hints: [供需, 价格, 库存, 出货量, 资本开支, capex]
+    evidence_groups: [[供需, 价格, 库存], [出货量, 资本开支, capex]]
+    query_templates: ["{question} 供需 价格 库存 出货量 下游资本开支"]
+    tools: [local_search, web_search]
+    source_profiles: [local_industry_archive, domestic_industry_web, overseas_industry_web]
+  - name: bottleneck_competition
+    description: Supplier concentration, substitutes, technical barriers and representative-company evidence.
+    required: true
+    evidence_hints: [供应商, 市占率, 替代, 技术壁垒, 竞争格局, 认证]
+    evidence_groups: [[供应商, 市占率, 替代], [技术壁垒, 竞争格局, 认证]]
+    query_templates: ["{question} 供应商 市占率 替代 技术壁垒 竞争格局"]
+    tools: [local_search, web_search]
+    source_profiles: [local_industry_archive, domestic_industry_web, overseas_industry_web]
+  - name: policy_global_mapping
+    description: Policy, export controls and overseas-map evidence affecting the industry chain.
+    required: true
+    evidence_hints: [政策, 补贴, 出口管制, 关税, 海外, 全球]
+    evidence_groups: [[政策, 补贴], [出口管制, 关税, 海外, 全球]]
+    query_templates: ["{question} 政策 出口管制 关税 海外 全球"]
+    tools: [web_search, local_search]
+    source_profiles: [domestic_industry_web, overseas_industry_web, local_industry_archive]

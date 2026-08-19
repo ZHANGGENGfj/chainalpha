@@ -24,7 +24,7 @@ from chainalpha.investment.llm_reply import (
     render_topic_reply,
 )
 from chainalpha.investment.market_data import load_financial_snapshots, load_price_snapshots
-from chainalpha.investment.topic_report import (
+from chainalpha.reports.company_report import (
     build_topic_research_report,
     render_professional_topic_report,
     render_topic_research_markdown,

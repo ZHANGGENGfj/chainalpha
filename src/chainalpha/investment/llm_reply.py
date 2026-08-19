@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from chainalpha.config import load_settings
-from chainalpha.investment.evidence_pack import build_professional_evidence_pack
+from chainalpha.reports.evidence_pack import build_professional_evidence_pack
 from chainalpha.nlp.llm_client import LLMClient
 from chainalpha.schemas import InvestmentCandidate, WeakSignal
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Financial Evidence Research"
+  short_description: "Collect and verify traceable financial evidence"
+  default_prompt: "Use $financial-evidence-research to collect and verify financial evidence for this research question."

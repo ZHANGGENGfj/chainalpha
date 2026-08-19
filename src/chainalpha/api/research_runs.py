@@ -11,9 +11,12 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
+
+from chainalpha.auth.router import require_user
+from chainalpha.auth.service import CurrentUser
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -43,7 +46,9 @@ class CreateRunRequest(BaseModel):
     include_a_share_reports: bool = True
     company_profile_source: Literal["llm", "local", "hybrid", "resolver"] = "llm"
     retrieval_backend: Literal["auto", "hybrid", "llamaindex"] = "auto"
-    skip_refresh_news: bool = True
+    # Enabling collection only permits a Skill-selected targeted crawl; it no
+    # longer causes every request to execute a fixed full-source crawl.
+    skip_refresh_news: bool = False
     limit: int = Field(80, ge=1, le=300)
     top_k_chunks: int = Field(60, ge=1, le=300)
     top_k_companies: int = Field(6, ge=1, le=30)
@@ -71,7 +76,7 @@ _RUNNING: dict[str, RunningTask] = {}
 
 
 @router.post("/runs")
-def create_run(req: CreateRunRequest) -> dict:
+def create_run(req: CreateRunRequest, user: CurrentUser = Depends(require_user)) -> dict:
     RUN_ROOT.mkdir(parents=True, exist_ok=True)
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = RUN_ROOT / run_id
@@ -87,6 +92,7 @@ def create_run(req: CreateRunRequest) -> dict:
     request_data["chain_visual"] = True
     request_data["report_quality_check"] = True
     request_data["include_a_share_reports"] = True
+    request_data["user_id"] = user.id
     (output_dir / "run_request.json").write_text(
         json.dumps(request_data, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -125,16 +131,16 @@ def create_run(req: CreateRunRequest) -> dict:
 
 
 @router.get("/sessions")
-def list_sessions() -> dict:
+def list_sessions(user: CurrentUser = Depends(require_user)) -> dict:
     SESSION_ROOT.mkdir(parents=True, exist_ok=True)
     sessions = [_read_json(path) for path in SESSION_ROOT.glob("*.json")]
-    sessions = [item for item in sessions if item.get("id")]
+    sessions = [item for item in sessions if item.get("id") and _owned_by(item, user)]
     sessions.sort(key=lambda item: item.get("updated_at") or item.get("created_at") or "", reverse=True)
     return {"sessions": sessions[:100]}
 
 
 @router.post("/sessions")
-def create_session(payload: ChatSessionPayload) -> dict:
+def create_session(payload: ChatSessionPayload, user: CurrentUser = Depends(require_user)) -> dict:
     SESSION_ROOT.mkdir(parents=True, exist_ok=True)
     session_id = datetime.now().strftime("session_%Y%m%d_%H%M%S_%f")
     session = {
@@ -142,6 +148,7 @@ def create_session(payload: ChatSessionPayload) -> dict:
         "title": payload.title or "新研究",
         "created_at": _now(),
         "updated_at": _now(),
+        "user_id": user.id,
         "messages": payload.messages,
     }
     _write_session(session)
@@ -149,22 +156,27 @@ def create_session(payload: ChatSessionPayload) -> dict:
 
 
 @router.get("/sessions/{session_id}")
-def get_session(session_id: str) -> dict:
+def get_session(session_id: str, user: CurrentUser = Depends(require_user)) -> dict:
     path = _session_path(session_id)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Session not found")
-    return _read_json(path)
+    session = _read_json(path)
+    _ensure_owned(session, user)
+    return session
 
 
 @router.put("/sessions/{session_id}")
-def save_session(session_id: str, payload: ChatSessionPayload) -> dict:
+def save_session(session_id: str, payload: ChatSessionPayload, user: CurrentUser = Depends(require_user)) -> dict:
     path = _session_path(session_id)
     existing = _read_json(path) if path.exists() else {}
+    if existing:
+        _ensure_owned(existing, user)
     session = {
         "id": session_id,
         "title": payload.title or existing.get("title") or "新研究",
         "created_at": existing.get("created_at") or _now(),
         "updated_at": _now(),
+        "user_id": existing.get("user_id", user.id),
         "messages": payload.messages,
     }
     _write_session(session)
@@ -172,35 +184,39 @@ def save_session(session_id: str, payload: ChatSessionPayload) -> dict:
 
 
 @router.delete("/sessions/{session_id}")
-def delete_session(session_id: str) -> dict:
+def delete_session(session_id: str, user: CurrentUser = Depends(require_user)) -> dict:
     path = _session_path(session_id)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Session not found")
+    _ensure_owned(_read_json(path), user)
     path.unlink()
     return {"deleted": True, "id": session_id}
 
 
 @router.get("/runs")
-def list_runs() -> dict:
+def list_runs(user: CurrentUser = Depends(require_user)) -> dict:
     RUN_ROOT.mkdir(parents=True, exist_ok=True)
     run_dirs = [p for p in RUN_ROOT.iterdir() if p.is_dir()]
     run_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    run_dirs = [path for path in run_dirs if _run_owned_by(path, user)]
     return {"runs": [_run_summary(path) for path in run_dirs[:50]]}
 
 
 @router.get("/runs/{run_id}")
-def get_run(run_id: str) -> dict:
+def get_run(run_id: str, user: CurrentUser = Depends(require_user)) -> dict:
     path = _run_path(run_id)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Run not found")
+    _ensure_run_owned(path, user)
     return _run_summary(path)
 
 
 @router.get("/runs/{run_id}/stream")
-def stream_run(run_id: str) -> StreamingResponse:
+def stream_run(run_id: str, user: CurrentUser = Depends(require_user)) -> StreamingResponse:
     path = _run_path(run_id)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Run not found")
+    _ensure_run_owned(path, user)
 
     def events():
         last_payload = ""
@@ -218,8 +234,9 @@ def stream_run(run_id: str) -> StreamingResponse:
 
 
 @router.get("/runs/{run_id}/report")
-def get_report(run_id: str, format: Literal["markdown", "html"] = "markdown") -> dict:
+def get_report(run_id: str, format: Literal["markdown", "html"] = "markdown", user: CurrentUser = Depends(require_user)) -> dict:
     path = _run_path(run_id)
+    _ensure_run_owned(path, user)
     report_type = _report_type_for(path, _RUNNING.get(run_id))
     report_path = _best_report_path(path, format, report_type)
     if not report_path.exists():
@@ -233,18 +250,20 @@ def get_report(run_id: str, format: Literal["markdown", "html"] = "markdown") ->
 
 
 @router.get("/runs/{run_id}/artifacts")
-def list_artifacts(run_id: str) -> dict:
+def list_artifacts(run_id: str, user: CurrentUser = Depends(require_user)) -> dict:
     path = _run_path(run_id)
+    _ensure_run_owned(path, user)
     artifacts = [_artifact_info(run_id, item) for item in path.iterdir() if item.is_file() and item.suffix.lower() in SAFE_ARTIFACTS]
     artifacts.sort(key=lambda item: item["name"])
     return {"run_id": run_id, "artifacts": artifacts}
 
 
 @router.get("/runs/{run_id}/files/{filename}")
-def get_artifact_file(run_id: str, filename: str) -> FileResponse:
+def get_artifact_file(run_id: str, filename: str, user: CurrentUser = Depends(require_user)) -> FileResponse:
     if "/" in filename or "\\" in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
     path = _run_path(run_id) / filename
+    _ensure_run_owned(path.parent, user)
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Artifact not found")
     media_type = SAFE_ARTIFACTS.get(path.suffix.lower())
@@ -278,6 +297,8 @@ def _build_run_command(req: CreateRunRequest, run_id: str) -> list[str]:
         "company",
     ]
     cmd.extend(["--llm-summary", "--chain-visual", "--include-a-share-reports"])
+    if req.session_id:
+        cmd.extend(["--memory-session-id", req.session_id])
     if req.skip_refresh_news:
         cmd.append("--skip-refresh-news")
     return cmd
@@ -531,6 +552,30 @@ def _run_path(run_id: str) -> Path:
     if cleaned != run_id or not cleaned:
         raise HTTPException(status_code=400, detail="Invalid run_id")
     return RUN_ROOT / cleaned
+
+
+def _run_owned_by(path: Path, user: CurrentUser) -> bool:
+    return _owned_by(_read_json(path / "run_request.json"), user)
+
+
+def _ensure_run_owned(path: Path, user: CurrentUser) -> None:
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Run not found")
+    _ensure_owned(_read_json(path / "run_request.json"), user)
+
+
+def _owned_by(record: dict, user: CurrentUser) -> bool:
+    owner_id = record.get("user_id")
+    if owner_id is None:
+        # Legacy records predate account ownership. Do not expose them to a
+        # newly authenticated account merely because it has admin privileges.
+        return user.id == 0
+    return int(owner_id) == user.id
+
+
+def _ensure_owned(record: dict, user: CurrentUser) -> None:
+    if not _owned_by(record, user):
+        raise HTTPException(status_code=403, detail="无权访问此资源")
 
 
 def _session_path(session_id: str) -> Path:
