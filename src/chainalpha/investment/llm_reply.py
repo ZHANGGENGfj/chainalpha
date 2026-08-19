@@ -927,8 +927,8 @@ def _compose_professional_report_from_chunk_notes(
         return client.chat_text(system, user, timeout=180)
     user = f"""
 FINAL PRESENTATION RULES (take precedence over any template text below):
-- Use these 11 numbered sections only: 1. 核心结论; 2. 公司概况与商业模式; 3. 近期事件与市场表现; 4. 财务深度分析; 5. 行业与产业链分析; 6. 竞争格局; 7. 盈利预测; 8. 预期差与催化剂; 9. 风险与证伪条件; 10. 跟踪指标; 11. 附录.
-- Do not generate valuation analysis, valuation multiples, price targets, PEG, or valuation placeholders.
+- Use these 10 numbered sections only: 1. 核心结论; 2. 公司概况与商业模式; 3. 近期事件与市场表现; 4. 财务深度分析; 5. 行业与产业链分析; 6. 竞争格局; 7. 预期差与催化剂; 8. 风险与证伪条件; 9. 跟踪指标仪表盘; 10. 附录.
+- Do not generate valuation analysis, earnings forecasts, valuation multiples, price targets, PEG, EPS, or placeholders for those items.
 - Do not generate an investment six-dimension analysis table or any six-dimension data-gap table.
 - Only show a section, subsection, table row, or table column when the supplied evidence contains a traceable fact for it.
 - Never write placeholder prose such as "数据缺口", "待补", "暂无数据", "无直接证据", or an explanation of what data should be collected. Missing evidence is an internal retrieval task, not report body content.
@@ -937,34 +937,32 @@ FINAL PRESENTATION RULES (take precedence over any template text below):
 
 请基于输入的分批证据摘要，合成一份专业中文 Markdown 投资研究报告。
 
-必须严格使用以下 12 个一级章节，标题、编号、顺序不能改变：
+必须严格使用以下 10 个一级章节，标题、编号、顺序不能改变：
 ## 1. 核心结论
 ## 2. 公司概况与商业模式
 ## 3. 近期事件与市场表现
 ## 4. 财务深度分析
 ## 5. 行业与产业链分析
 ## 6. 竞争格局
-## 7. 估值分析
-## 8. 盈利预测
-## 9. 预期差与催化剂
-## 10. 风险与证伪条件
-## 11. 跟踪指标仪表盘
-## 12. 附录
+## 7. 预期差与催化剂
+## 8. 风险与证伪条件
+## 9. 跟踪指标仪表盘
+## 10. 附录
 
 写作要求：
 1. 使用分批摘要中的事实和待核验线索，不要回到原始长文本。
-2. 每个章节都要有内容；缺少硬数据时，写验证框架和需要补充的数据。不能忽略输入中的 web_financial_facts 或 financial_fact_matrix。
+2. 只输出有可追溯证据支持的章节内容；缺少硬数据的子项直接省略。不能忽略输入中的 web_financial_facts 或 financial_fact_matrix。
 3. 光模块产业链优先使用 corrected_chain_logic，不能把 GPU 集群写成直接上游，不能把激光器/光器件机械写成下游客户。
 4. 附录用自然语言说明数据来源和质量，不要出现程序字段名。
-5. 必须在“## 1. 核心结论”或“## 11. 跟踪指标仪表盘”中输出一个“投资六维分析表”，列为：维度、当前判断、证据、数据缺口、后续验证路径；六个维度必须包括技术面、资金面、基本面、产业景气度、政策、产业链。若某一维度缺少证据，写“数据缺口 + 后续验证路径”，不能省略。
+5. 不要输出“投资六维分析表”。
 6. 如果输入里出现 filtered_signal_count 或数据质量提示，必须说明部分规则信号已被剔除；不得把来自F10、财务网页或搜索页的低置信度规则信号写成订单、政策、扩产、客户认证等确定事实。
 7. 第 3 节必须先给出“近期事件证据表”：事件、日期/报告期、来源、证据等级、投研含义；没有直接事件时明确写无直接证据。
-8. 第 4 节必须优先根据 financial_fact_matrix 输出“财务事实与利润质量表”，列为：项目、已抓取事实、报告期/同比口径、来源、证据等级、投研解读。项目至少覆盖主要会计数据、毛利率、现金流、存货、应收账款、研发费用；输入没有某项目时才标注数据缺口。不得把 F10 网页的“诊断文字”误写成公司公告或审计结论。
-9. 第 7 节的估值数据与第 8 节的预测数据必须严格区分：没有 PE/PB/PS 或一致预期时，写估值/预测框架和缺失来源，不要用重复的空泛风险段落代替。
-10. 第 12 节必须给出“证据来源台账”，用 Markdown 链接列出实际使用的公告、F10、财务网页或新闻页面，并说明每类来源的证据等级。
+8. 第 4 节必须优先根据 financial_fact_matrix 直接输出财务事实表，列为：项目、已抓取事实、报告期/同比口径、来源、证据等级、投研解读。表格前不要使用“### 财务事实与利润质量表”或任何三级标题；如需标签，只能使用普通加粗文字“**财务事实与利润质量**”。项目至少覆盖主要会计数据、毛利率、现金流、存货、应收账款、研发费用。不得把 F10 网页的“诊断文字”误写成公司公告或审计结论。
+9. 不得生成估值分析、盈利预测、EPS 预测、估值框架或数据补全建议。
+10. 第 10 节必须给出“证据来源台账”，用 Markdown 链接列出实际使用的公告、F10、财务网页或新闻页面，并说明每类来源的证据等级。
 11. 不能把搜索结果页、网站首页或产业链图谱节点当作事实证据；它们最多只能写为“检索线索”。公司报告中不得将泛化的 GPU、AI ASIC、模型 API 等节点写成目标公司的真实客户、供应商或业务。
 12. 同一指标若混有不同报告期，必须逐项标明期间，不能把年报、季报和网页抓取日混为同一口径。F10 的自动诊断结论必须标注为“网页诊断线索，待原始报表复核”。
-13. 避免重复：第 11 节只能列跟踪阈值和频率，不能复述第 1 节六维表；第 7、8 节若数据不足，各用一段简洁的数据缺口和具体补数路径即可。
+13. 避免重复：第 9 节只能列跟踪指标和频率，不能复述前文结论。
 
 输入 JSON：
 {json.dumps(compact_payload, ensure_ascii=False, indent=2)}

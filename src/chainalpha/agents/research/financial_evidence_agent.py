@@ -39,6 +39,8 @@ class ToolAgentState(TypedDict, total=False):
     stalled_rounds: int
     last_new_evidence: int
     max_iterations: int
+    web_pages_used: int
+    max_web_pages: int
 
 
 @dataclass
@@ -93,6 +95,7 @@ class LangGraphResearchAgent:
         enable_targeted_crawl: bool = True,
         top_k: int = 6,
         max_iterations: int | None = None,
+        max_web_pages: int = 20,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         skill_root: str | Path | None = None,
         state_path: str | Path | None = None,
@@ -106,6 +109,7 @@ class LangGraphResearchAgent:
         self.enable_targeted_crawl = enable_targeted_crawl
         self.top_k = top_k
         self.max_iterations = max(1, int(max_iterations or 10))
+        self.max_web_pages = max(0, int(max_web_pages))
         self.progress_callback = progress_callback
         project_root = settings.project_root
         self.skill_registry = SkillRegistry.load(skill_root)
@@ -128,6 +132,7 @@ class LangGraphResearchAgent:
             media_crawler_root=self.media_crawler_root,
             evidence_memory=self.evidence_memory,
             top_k=self.top_k,
+            max_external_pages=self.max_web_pages,
             registry=self.tool_registry,
         )
         self.task_planner = ResearchTaskPlanner(self.client, self.skill_registry)
@@ -144,7 +149,11 @@ class LangGraphResearchAgent:
         self._active_target = target_name.strip() or target_ticker.strip()
         app, framework = self._compile_graph()
         persisted = self.state_store.load(question=question, target_name=target_name.strip()) if self.state_store and resume else None
-        initial: ToolAgentState = ({**persisted, "research_type": research_type} if persisted else {
+        initial: ToolAgentState = ({
+            **persisted,
+            "research_type": research_type,
+            "max_web_pages": self.max_web_pages,
+        } if persisted else {
             "question": question,
             "target_name": target_name.strip(),
             "target_ticker": target_ticker.strip(),
@@ -160,6 +169,8 @@ class LangGraphResearchAgent:
             "last_new_evidence": 0,
             "enough": False,
             "max_iterations": self.max_iterations,
+            "web_pages_used": 0,
+            "max_web_pages": self.max_web_pages,
         })
         if not initial.get("tasks"):
             tasks, planner_name = self.task_planner.plan(
@@ -254,6 +265,15 @@ class LangGraphResearchAgent:
         plan = self._validated_model_plan(prepared, decision, gaps, task=task)
         if plan is None:
             plan = fallback
+        if self._web_page_budget_exhausted(prepared) and plan and plan.action != "local_search":
+            # Once the public-page allowance is spent, keep only the fast
+            # local archive path available for remaining evidence checks.
+            plan = self._next_skill_plan(
+                prepared,
+                gaps=gaps,
+                task=task,
+                enabled_tools={"local_search"},
+            )
         if not task or not gaps:
             plan = None
         if plan is None:
@@ -315,17 +335,33 @@ class LangGraphResearchAgent:
             docs,
             warning,
             latency_ms=(time.perf_counter() - started) * 1000,
+            is_external_page_fetch=True,
+            external_pages_fetched=self._last_external_pages_fetched(docs),
         )
 
     def _targeted_news_crawl_node(self, state: ToolAgentState) -> ToolAgentState:
+        query = state.get("next_query") or state["question"]
+        self._emit_progress(
+            {
+                "type": "crawler",
+                "title": "正在调用 MediaCrawler",
+                "message": f"正在检索财经资讯：{query}",
+                "action": "targeted_news_crawl",
+                "query": query,
+                "source_profile": state.get("next_source_profile") or "",
+                "status": "started",
+            }
+        )
         started = time.perf_counter()
-        docs, warning = self._run_targeted_news_crawl(state.get("next_query") or state["question"], state)
+        docs, warning = self._run_targeted_news_crawl(query, state)
         return self._append_tool_result(
             state,
             "targeted_news_crawl",
             docs,
             warning,
             latency_ms=(time.perf_counter() - started) * 1000,
+            is_external_page_fetch=True,
+            external_pages_fetched=self._last_external_pages_fetched(docs),
         )
 
     def _judge_node(self, state: ToolAgentState) -> ToolAgentState:
@@ -537,6 +573,8 @@ class LangGraphResearchAgent:
             "tasks_completed": len(completed),
             "tasks_exhausted": len(exhausted),
             "coverage_rate": round(len(completed) / total, 4) if total else 0.0,
+            "web_pages_used": int(state.get("web_pages_used") or 0),
+            "web_pages_limit": int(state.get("max_web_pages") or self.max_web_pages),
             "remaining_capabilities": [
                 capability
                 for task in tasks
@@ -565,6 +603,7 @@ class LangGraphResearchAgent:
         *,
         gaps: list[str] | None = None,
         task: dict[str, Any] | None = None,
+        enabled_tools: set[str] | None = None,
     ) -> SkillPlan | None:
         scores = self.performance_store.scores()
         plan = self.skill_registry.next_plan(
@@ -574,13 +613,19 @@ class LangGraphResearchAgent:
             question=state["question"],
             steps=state.get("steps") or [],
             tool_scores=scores,
-            enabled_tools=self._enabled_tools(),
+            enabled_tools=enabled_tools if enabled_tools is not None else self._enabled_tools(),
             research_type=str(state.get("research_type") or "company"),
         )
         return self._apply_task_source_preference(plan, task)
 
     def _enabled_tools(self) -> set[str]:
         return self.tool_registry.enabled_names()
+
+    def _remaining_web_pages(self, state: ToolAgentState) -> int:
+        return max(0, int(state.get("max_web_pages") or self.max_web_pages) - int(state.get("web_pages_used") or 0))
+
+    def _web_page_budget_exhausted(self, state: ToolAgentState) -> bool:
+        return self._remaining_web_pages(state) <= 0
 
     def _validated_model_plan(
         self,
@@ -654,14 +699,23 @@ class LangGraphResearchAgent:
         )
 
     def _run_web_search(self, query: str, state: ToolAgentState) -> tuple[list[SourceDocument], str]:
-        return self.tools.web_search(query, profile=self._source_profile_for(state))
+        return self.tools.web_search(
+            query,
+            profile=self._source_profile_for(state),
+            page_budget=self._remaining_web_pages(state),
+        )
 
     def _run_targeted_news_crawl(self, query: str, state: ToolAgentState) -> tuple[list[SourceDocument], str]:
         return self.tools.targeted_news_crawl(
             query,
             target=getattr(self, "_active_target", ""),
             profile=self._source_profile_for(state),
+            page_budget=self._remaining_web_pages(state),
         )
+
+    def _last_external_pages_fetched(self, docs: list[SourceDocument]) -> int:
+        recorded = int(getattr(self.tools, "last_external_pages_fetched", 0) or 0)
+        return recorded if recorded > 0 else len({str(doc.url) for doc in docs if doc.url})
 
     def _source_profile_for(self, state: ToolAgentState) -> SkillSourceProfile | None:
         return self.tool_registry.source_profile(
@@ -678,7 +732,16 @@ class LangGraphResearchAgent:
         warning: str,
         *,
         latency_ms: float = 0.0,
+        is_external_page_fetch: bool = False,
+        external_pages_fetched: int = 0,
     ) -> ToolAgentState:
+        if is_external_page_fetch:
+            remaining_pages = self._remaining_web_pages(state)
+            if remaining_pages <= 0:
+                docs = []
+                warning = "; ".join(part for part in [warning, "public page budget reached"] if part)
+            else:
+                docs = docs[:remaining_pages]
         relevant_docs, ignored = self._target_relevant_docs(docs, state)
         packed = [_pack_doc(doc) for doc in relevant_docs[: self.top_k]]
         task_id = str(state.get("active_task_id") or "")
@@ -693,6 +756,7 @@ class LangGraphResearchAgent:
         if ignored:
             warnings.append(f"{action}: filtered {ignored} non-target document(s) before evidence injection")
         effective_warning = warning or (f"filtered {ignored} non-target document(s)" if ignored else "")
+        fetched_pages = max(0, int(external_pages_fetched)) if is_external_page_fetch else 0
         steps = [
             *(state.get("steps") or []),
             {
@@ -709,6 +773,7 @@ class LangGraphResearchAgent:
                 "new_evidence": new_evidence,
                 "latency_ms": round(latency_ms, 2),
                 "warning": effective_warning,
+                "web_pages_fetched": fetched_pages,
             },
         ]
         self._emit_progress(
@@ -749,6 +814,7 @@ class LangGraphResearchAgent:
             "warnings": warnings,
             "steps": steps,
             "last_new_evidence": new_evidence,
+            "web_pages_used": int(state.get("web_pages_used") or 0) + fetched_pages,
         }
         self._snapshot(updated, action)
         return updated

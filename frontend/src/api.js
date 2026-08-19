@@ -58,6 +58,12 @@ export async function createRun(form, context = {}) {
   });
 }
 
+export async function cancelRun(runId) {
+  return requestJson(`/api/runs/${encodeURIComponent(runId)}/cancel`, {
+    method: "POST"
+  });
+}
+
 export async function fetchReport(runId, format = "markdown") {
   return requestJson(`/api/runs/${encodeURIComponent(runId)}/report?format=${format}`);
 }

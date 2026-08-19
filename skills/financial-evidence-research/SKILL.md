@@ -11,7 +11,9 @@ Build conclusions from traceable evidence. Treat search results as candidates, n
 
 1. Resolve the target entity and ticker before searching.
 2. Inspect existing evidence coverage and select one missing capability.
-3. Prefer local indexed evidence, then use public web search for uncovered facts.
+3. Prefer local indexed evidence. For uncovered facts, use only the configured
+   MediaCrawler finance-news platform with a target-specific query; do not use
+   the generic public-web search connector.
 4. Fetch article or filing content; discard search landing pages and off-target issuers.
 5. Deduplicate by canonical URL and evidence identity.
 6. Preserve source, publication time, as-of date, and content excerpt.

@@ -35,6 +35,7 @@ class CompanyEvidenceResearchRequest:
     state_path: Path
     performance_path: Path
     evidence_memory_path: Path
+    max_web_pages: int = 20
     preference_context: str = ""
     progress_callback: Callable[[dict[str, Any]], None] | None = None
 
@@ -63,6 +64,7 @@ def run_company_evidence_research(
         enable_targeted_crawl=request.enable_targeted_crawl,
         top_k=request.top_k,
         max_iterations=request.max_iterations,
+        max_web_pages=request.max_web_pages,
         skill_root=request.skill_root,
         state_path=request.state_path,
         performance_path=request.performance_path,

@@ -530,6 +530,21 @@ pre {
   gap: 10px;
 }
 
+.end-run-button {
+  justify-self: start;
+  border: 1px solid #e6b9b9;
+  border-radius: 7px;
+  background: #fff;
+  color: #a12828;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.end-run-button:hover {
+  background: #fff2f2;
+}
+
 .spinner {
   width: 16px;
   height: 16px;
@@ -601,6 +616,61 @@ pre {
   color: #333;
   font-size: 13px;
   line-height: 1.5;
+}
+
+.research-progress-log {
+  display: grid;
+  gap: 4px;
+  margin: 4px 0 0;
+  color: #8a8f98;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.research-progress-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.research-progress-entry span {
+  color: #6d727b;
+  flex: 0 0 auto;
+}
+
+.research-progress-entry small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #9ba0a8;
+  font-size: 11px;
+}
+
+.live-report-draft {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
+  color: #9aa0a8;
+  font-size: 11px;
+}
+
+.live-report-draft > span {
+  color: #7d838c;
+}
+
+.live-report-draft pre {
+  max-height: 144px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #9aa0a8;
+  font: inherit;
+  line-height: 1.55;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .pulse-dot {

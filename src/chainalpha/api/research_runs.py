@@ -211,6 +211,25 @@ def get_run(run_id: str, user: CurrentUser = Depends(require_user)) -> dict:
     return _run_summary(path)
 
 
+@router.post("/runs/{run_id}/cancel")
+def cancel_run(run_id: str, user: CurrentUser = Depends(require_user)) -> dict:
+    """Stop a running research subprocess owned by the current user."""
+    path = _run_path(run_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Run not found")
+    _ensure_run_owned(path, user)
+
+    task = _RUNNING.get(run_id)
+    if task and task.process.poll() is None:
+        _terminate_process_tree(task.process)
+    _RUNNING.pop(run_id, None)
+    (path / "cancelled.json").write_text(
+        json.dumps({"cancelled_at": _now(), "user_id": user.id}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return {"run_id": run_id, "status": "cancelled"}
+
+
 @router.get("/runs/{run_id}/stream")
 def stream_run(run_id: str, user: CurrentUser = Depends(require_user)) -> StreamingResponse:
     path = _run_path(run_id)
@@ -226,7 +245,7 @@ def stream_run(run_id: str, user: CurrentUser = Depends(require_user)) -> Stream
             if payload != last_payload:
                 yield f"data: {payload}\n\n"
                 last_payload = payload
-            if summary.get("status") in {"completed", "failed", "unknown"}:
+            if summary.get("status") in {"completed", "failed", "cancelled", "unknown"}:
                 break
             time.sleep(0.05)
 
@@ -316,14 +335,14 @@ def _run_summary(path: Path) -> dict:
     artifacts = [item.name for item in path.iterdir() if item.is_file() and item.suffix.lower() in SAFE_ARTIFACTS]
     companies = _company_names(topic_data, query_data)
     timeline = _timeline_for(path)
-    # The chat UI intentionally exposes source pages, not intermediate model
-    # drafts. Final output is shown only after the report artifact is complete.
-    live_output = ""
+    # Model deltas contain the report draft, not hidden reasoning. The client
+    # renders them as a subdued, streaming preview until final Markdown exists.
+    live_output = _live_output_for(path)
     return {
         "run_id": run_id,
         "topic": topic_data.get("topic") or (running.topic if running else query_data.get("original_query")) or run_id,
         "status": status,
-        "stage": "已完成" if status == "completed" else "运行中",
+        "stage": "已结束" if status == "cancelled" else ("已完成" if status == "completed" else "运行中"),
         "started_at": running.started_at if running else _mtime(path),
         "output_dir": _rel(path),
         "metrics": {
@@ -450,6 +469,9 @@ def _current_stage(status: str, timeline: list[dict[str, Any]]) -> str:
 
 
 def _status_for(run_id: str) -> str:
+    if (_run_path(run_id) / "cancelled.json").exists():
+        _RUNNING.pop(run_id, None)
+        return "cancelled"
     running = _RUNNING.get(run_id)
     if not running:
         path = _run_path(run_id)
@@ -464,6 +486,29 @@ def _status_for(run_id: str) -> str:
         return "running"
     _RUNNING.pop(run_id, None)
     return "completed" if code == 0 else "failed"
+
+
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    """Terminate the run and descendants, including a nested crawler process."""
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        else:
+            process.terminate()
+            process.wait(timeout=8)
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
 
 
 def _report_type_for(path: Path, running: RunningTask | None) -> str:

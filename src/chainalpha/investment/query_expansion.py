@@ -47,6 +47,7 @@ class QueryExpansion:
     product_terms: list[str] = field(default_factory=list)
     event_terms: list[str] = field(default_factory=list)
     research_focus_terms: list[str] = field(default_factory=list)
+    research_queries: list[str] = field(default_factory=list)
     negative_terms: list[str] = field(default_factory=list)
     confidence: float = 0.5
     method: str = "rules"
@@ -66,6 +67,7 @@ class QueryExpansion:
             "product_terms": self.product_terms,
             "event_terms": self.event_terms,
             "research_focus_terms": self.research_focus_terms,
+            "research_queries": self.research_queries,
             "negative_terms": self.negative_terms,
             "confidence": self.confidence,
             "method": self.method,
@@ -115,6 +117,12 @@ class QueryExpansion:
             terms = [subject, *_material_chain_crawl_terms(subject, self), *terms]
         return _unique_terms(terms, limit=48)
 
+    @property
+    def collection_queries(self) -> list[str]:
+        """Exactly four focused queries for the bounded public-information pass."""
+        queries = _unique_terms(self.research_queries, limit=4)
+        return queries if len(queries) == 4 else _default_research_queries(self)
+
 
 def expand_user_query(
     query: str,
@@ -161,6 +169,9 @@ def _llm_expand_query(query: str, base: QueryExpansion, settings) -> dict[str, A
             "research_focus_terms 放入产业链瓶颈研究证据词，例如客户认证、前五大客户、供应商、产能、良率、扩产、替代、毛利率、存货、应收账款、机构覆盖、一致预期、价值量、认证周期。",
             "negative_terms放入可能造成误搜的词，不要放入keywords。",
         ],
+        # The report workflow consumes exactly four of these focused queries.
+        # Keep the instruction near the schema so every API provider receives it.
+        "research_query_constraint": "Return exactly 4 short entity-scoped search queries: recent events, business/products, financial performance, and risks/industry chain.",
         "json_schema": {
             "corrected_query": "str",
             "intent": "company|sector|theme|claim|market|explain|unknown",
@@ -173,6 +184,7 @@ def _llm_expand_query(query: str, base: QueryExpansion, settings) -> dict[str, A
             "product_terms": ["str"],
             "event_terms": ["str"],
             "research_focus_terms": ["str"],
+            "research_queries": ["exactly 4 short, entity-scoped search queries"],
             "negative_terms": ["str"],
             "confidence": "0-1 float",
         },
@@ -314,6 +326,7 @@ def _merge_expansion(base: QueryExpansion, result: dict[str, Any]) -> QueryExpan
         product_terms=[*base.product_terms, *_list_field(result, "product_terms")],
         event_terms=[*base.event_terms, *_list_field(result, "event_terms")],
         research_focus_terms=[*base.research_focus_terms, *_list_field(result, "research_focus_terms")],
+        research_queries=_list_field(result, "research_queries"),
         negative_terms=[*base.negative_terms, *_list_field(result, "negative_terms")],
         confidence=_float_field(result.get("confidence"), default=base.confidence),
         method="llm",
@@ -334,6 +347,7 @@ def _dedup_expansion(expansion: QueryExpansion) -> None:
     expansion.product_terms = _unique_terms(expansion.product_terms, limit=16)
     expansion.event_terms = _unique_terms(expansion.event_terms, limit=16)
     expansion.research_focus_terms = _unique_terms(expansion.research_focus_terms, limit=24)
+    expansion.research_queries = _unique_terms(expansion.research_queries, limit=4)
     expansion.negative_terms = _unique_terms(expansion.negative_terms, limit=12)
 
 
@@ -398,6 +412,16 @@ def _primary_query_subject(expansion: QueryExpansion) -> str:
         if clean:
             return clean
     return _clean_query(expansion.corrected_query or expansion.original_query)
+
+
+def _default_research_queries(expansion: QueryExpansion) -> list[str]:
+    """Create four bounded retrieval queries if LLM expansion is unavailable."""
+    subject = _primary_query_subject(expansion)
+    if expansion.topic_class in {"raw_material_chain", "component_chain", "industry_chain"}:
+        dimensions = ["产业链 上游 下游", "供需 价格 产能", "上市公司 技术进展", "政策 风险"]
+    else:
+        dimensions = ["最新公告 近期动态", "主营业务 产品 客户", "财报 业绩 毛利率", "风险 竞争 产业链"]
+    return _unique_terms([f"{subject} {dimension}".strip() for dimension in dimensions], limit=4)
 
 
 def _crawl_keyword_dimensions(expansion: QueryExpansion) -> list[str]:

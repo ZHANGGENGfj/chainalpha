@@ -22,8 +22,8 @@ sources:
       - "https://search.stcn.com/?keyword={query}"
       - "https://www.cnstock.com/searchResult?word={query}"
     allowed_domains: [cls.cn, 21jingji.com, stcn.com, cnstock.com]
-    max_linked_pages_per_query: 3
-    timeout_seconds: 15
+    max_linked_pages_per_query: 1
+    timeout_seconds: 8
   - name: overseas_industry_web
     tool: web_search
     description: Public overseas reporting for global supply-demand, capex and technology-route evidence.
@@ -32,8 +32,8 @@ sources:
       - "https://www.reuters.com/site-search/?query={query}"
       - "https://36kr.com/search/articles/{query}"
     allowed_domains: [reuters.com, 36kr.com]
-    max_linked_pages_per_query: 2
-    timeout_seconds: 15
+    max_linked_pages_per_query: 1
+    timeout_seconds: 8
 capabilities:
   - name: chain_structure
     description: Upstream materials, core components, process links and downstream applications.

@@ -51,9 +51,23 @@ IMPORTANT_WORDS = {
     "低空经济": 2,
 }
 
+CHAINALPHA_RESULT_MARKER = "__CHAINALPHA_FINANCE_NEWS_RESULTS__="
+
 
 def clean_news_text(text: str | None) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def matches_query_terms(text: str, query: str) -> bool:
+    """Match whitespace-separated station-search terms as an AND query."""
+    normalized_text = clean_news_text(text).lower()
+    normalized_query = clean_news_text(query).lower()
+    if not normalized_query:
+        return True
+    if normalized_query in normalized_text:
+        return True
+    terms = [item for item in re.split(r"[\s,，、;；:：]+", normalized_query) if len(item) >= 2]
+    return bool(terms) and all(term in normalized_text for term in terms)
 
 
 def normalize_title(title: str) -> str:
@@ -357,7 +371,7 @@ class FinanceNewsCrawler(AbstractCrawler):
             try:
                 if self.keyword_list:
                     text = clean_news_text((item.get("标题") or "") + " " + (item.get("内容") or ""))
-                    matched = [keyword for keyword in self.keyword_list if keyword and keyword in text]
+                    matched = [keyword for keyword in self.keyword_list if matches_query_terms(text, keyword)]
                     if not matched:
                         continue
                     item["匹配关键词"] = ",".join(matched)
@@ -371,26 +385,44 @@ class FinanceNewsCrawler(AbstractCrawler):
             await self.start()
             return
 
-        client = FinanceNewsClient(self.browser_context)
-        raw_news = await client.fetch_all_news(limit_per_source=80, keywords=self.keyword_list)
-        print(f"[FinanceNews] fetched {len(raw_news)} raw news items before dedup")
-
-        raw_news, dedup_stats = self.dedup_index.filter_new(raw_news)
-        self.dedup_index.save()
-        print(
-            "[FinanceNews] kept {kept} new raw news after historical dedup "
-            "(url={duplicate_url}, exact_title={duplicate_title_exact_30d}, "
-            "fuzzy_title={duplicate_title_fuzzy_7d}, invalid={invalid})".format(**dedup_stats)
+        client = FinanceNewsClient(
+            self.browser_context,
+            max_page_loads=max(0, int(os.getenv("CHAINALPHA_FINANCE_NEWS_MAX_PAGES", "0") or 0)),
         )
+        queried_news = await client.fetch_all_news(limit_per_source=80, keywords=self.keyword_list)
+        print(f"[FinanceNews] fetched {len(queried_news)} raw news items before dedup")
+
+        persist_results = os.getenv("CHAINALPHA_FINANCE_NEWS_PERSIST_RESULTS", "1").strip() != "0"
+        if persist_results:
+            raw_news, dedup_stats = self.dedup_index.filter_new(queried_news)
+            self.dedup_index.save()
+            print(
+                "[FinanceNews] kept {kept} new raw news after historical dedup "
+                "(url={duplicate_url}, exact_title={duplicate_title_exact_30d}, "
+                "fuzzy_title={duplicate_title_fuzzy_7d}, invalid={invalid})".format(**dedup_stats)
+            )
+        else:
+            raw_news = queried_news
+            print("[FinanceNews] transient query mode: results will be returned without local persistence")
 
         if not raw_news:
+            if os.getenv("CHAINALPHA_FINANCE_NEWS_RETURN_RESULTS", "").strip() == "1":
+                processed_query = self.preprocess_news(queried_news)
+                print(f"{CHAINALPHA_RESULT_MARKER}{json.dumps(processed_query[:20], ensure_ascii=False)}")
             utils.logger.warning("[FinanceNews] no new news after dedup; skip saving raw/processed files")
             return
 
-        await self.save_raw_data(raw_news)
+        if persist_results:
+            await self.save_raw_data(raw_news)
         processed_news = self.preprocess_news(raw_news)
         print(f"[FinanceNews] processed {len(processed_news)} news items")
-        await self.save_processed_data(processed_news)
+        if persist_results:
+            await self.save_processed_data(processed_news)
+        if os.getenv("CHAINALPHA_FINANCE_NEWS_RETURN_RESULTS", "").strip() == "1":
+            # The parent Agent consumes this small, structured handoff instead
+            # of racing the just-written JSON files on Windows.
+            processed_query = self.preprocess_news(queried_news)
+            print(f"{CHAINALPHA_RESULT_MARKER}{json.dumps(processed_query[:20], ensure_ascii=False)}")
 
     async def start(self):
         async with async_playwright() as playwright:

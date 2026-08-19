@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import os
 import re
 from typing import Any, Dict, List
 from urllib.parse import quote, urlparse
@@ -79,12 +80,30 @@ class FinanceNewsClient:
         },
     ]
 
-    def __init__(self, browser_context: BrowserContext):
+    def __init__(self, browser_context: BrowserContext, *, max_page_loads: int = 0):
         self.browser_context = browser_context
+        self.max_page_loads = max(0, int(max_page_loads))
+        self._page_loads = 0
+        self._page_budget_lock = asyncio.Lock()
+
+    async def _reserve_page_load(self) -> bool:
+        """Reserve one browser navigation under the optional global budget."""
+        if not self.max_page_loads:
+            return True
+        async with self._page_budget_lock:
+            if self._page_loads >= self.max_page_loads:
+                return False
+            self._page_loads += 1
+            return True
 
     async def fetch_all_news(self, *, limit_per_source: int = 80, keywords: list[str] | None = None) -> List[Dict[str, Any]]:
         keyword_list = [keyword.strip() for keyword in keywords or [] if keyword and keyword.strip()]
         semaphore = asyncio.Semaphore(3)
+        source_offset = max(0, int(os.getenv("CHAINALPHA_FINANCE_NEWS_SOURCE_OFFSET", "0") or 0))
+        sources = self.SOURCES
+        if sources and source_offset:
+            position = source_offset % len(sources)
+            sources = [*sources[position:], *sources[:position]]
 
         async def fetch_one(source: dict[str, Any]) -> list[dict[str, Any]]:
             async with semaphore:
@@ -108,7 +127,7 @@ class FinanceNewsClient:
                 finally:
                     await asyncio.sleep(1.5)
 
-        batches = await asyncio.gather(*(fetch_one(source) for source in self.SOURCES))
+        batches = await asyncio.gather(*(fetch_one(source) for source in sources))
         results: list[dict[str, Any]] = []
         for rows in batches:
             results.extend(rows)
@@ -181,12 +200,19 @@ class FinanceNewsClient:
         fallback_to_body: bool = True,
         enforce_domain: bool = False,
     ) -> List[Dict[str, Any]]:
+        if not await self._reserve_page_load():
+            utils.logger.info("[FinanceNews] global page-load budget reached; skip remaining search pages")
+            return []
         page = await self.browser_context.new_page()
         page_url = url or source["url"]
+        fast_mode = os.getenv("CHAINALPHA_FINANCE_NEWS_FAST_MODE", "").strip() == "1"
+        navigation_timeout = 15_000 if fast_mode else 45_000
+        settle_ms = 700 if fast_mode else 2500
+        scroll_rounds = 0 if fast_mode else 2
         try:
-            await page.goto(page_url, wait_until="domcontentloaded", timeout=45000)
-            await page.wait_for_timeout(2500)
-            await self._auto_scroll(page, rounds=2)
+            await page.goto(page_url, wait_until="domcontentloaded", timeout=navigation_timeout)
+            await page.wait_for_timeout(settle_ms)
+            await self._auto_scroll(page, rounds=scroll_rounds)
 
             items: list[dict[str, Any]] = []
             seen: set[str] = set()
@@ -273,7 +299,14 @@ class FinanceNewsClient:
         if not keyword:
             return True
         text = self._clean(" ".join(str(row.get(key, "")) for key in ("标题", "内容", "summary")))
-        return keyword.lower() in text.lower()
+        if keyword.lower() in text.lower():
+            return True
+        # Station search supports multi-word queries, but result cards often
+        # omit the exact whitespace-separated phrase. Treat a short query as
+        # an AND query so "深科技 财报 业绩" still matches a card containing
+        # both the company and the financial dimension.
+        terms = [item for item in re.split(r"[\s,，、;；:：]+", keyword.lower()) if len(item) >= 2]
+        return bool(terms) and all(term in text.lower() for term in terms)
 
     def _is_allowed_domain(self, url: str, source: dict[str, Any]) -> bool:
         host = urlparse(url).netloc.lower()

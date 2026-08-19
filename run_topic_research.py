@@ -50,6 +50,7 @@ from chainalpha.workflows.company_evidence_research import (
     CompanyEvidenceResearchRequest,
     run_company_evidence_research,
 )
+from chainalpha.workflows.bounded_query_collection import collect_bounded_query_evidence
 from chainalpha.config import load_settings
 from chainalpha.connectors.base import SourceDocument
 from chainalpha.memory.research_memory import ResearchMemoryContext, ResearchMemoryService
@@ -135,6 +136,7 @@ def parse_args() -> argparse.Namespace:
         help="Safety cap for Skill/tool iterations; 0 uses 10. Search still stops early when evidence is covered or tools are exhausted.",
     )
     parser.add_argument("--tool-agent-top-k", type=int, default=6, help="Maximum documents per LangGraph tool call.")
+    parser.add_argument("--tool-agent-max-pages", type=int, default=20, help="Maximum public webpages collected by the LangGraph tool agent per run.")
     parser.add_argument("--runtime-skill-root", type=Path, default=Path(os.getenv("CHAINALPHA_SKILL_ROOT", "./skills")), help="Runtime financial Skill directory.")
     parser.add_argument("--agent-state-dir", type=Path, default=Path(os.getenv("CHAINALPHA_AGENT_STATE_DIR", "./data/agent_states")), help="Persistent Agent state snapshots.")
     parser.add_argument("--tool-performance-path", type=Path, default=Path(os.getenv("CHAINALPHA_TOOL_PERFORMANCE_PATH", "./data/agent/tool_performance.json")), help="Learned tool outcome statistics.")
@@ -396,7 +398,9 @@ def _run_topic_research(args: argparse.Namespace, out_dir: Path) -> None:
             print(f"Chain Bottleneck Markdown: {chain_md}")
             print(f"Chain Bottleneck HTML: {chain_html}")
 
+    _emit_run_event(out_dir, "stage", "研究框架整理", "正在汇总产业链、财务与风险证据，形成报告框架")
     agent_report = build_five_agent_research_report(report_data, chain_report_data)
+    _emit_run_event(out_dir, "artifact", "研究框架完成", "产业链、财务和风险证据已完成结构化整理")
     chain_visual_markdown = ""
     if args.chain_visual and _effective_research_type(args, query_expansion) == "industry-chain":
         visual_data = build_chain_visual_data(report_data, agent_report.to_dict())
@@ -494,9 +498,11 @@ def _build_evidence_context(
     tool_result = None
     tool_warning = ""
     extra_documents: list[SourceDocument] = []
-    if not args.skip_tool_agent:
+    # Kept temporarily for CLI compatibility, but the web/report default now
+    # uses the bounded four-query collector below instead of a re-planning loop.
+    if False and not args.skip_tool_agent:
         try:
-            _emit_run_event(out_dir, "stage", "工具检索 Agent", "正在补充本地和网页证据")
+            _emit_run_event(out_dir, "stage", "工具检索 Agent", "正在补充本地与财经资讯证据")
             preference_text = preference_context.prompt_context() if preference_context else ""
             workflow_result = run_company_evidence_research(
                 CompanyEvidenceResearchRequest(
@@ -508,10 +514,14 @@ def _build_evidence_context(
                     search_keywords=list(query_expansion.search_keywords),
                     crawl_keywords=list(query_expansion.crawl_keywords),
                     media_crawler_root=media_data_root,
-                    enable_web_search=not args.skip_tool_agent_web,
+                    # The interactive product uses MediaCrawler's configured
+                    # finance sources only. Generic page scraping is too slow
+                    # and unreliable for this path.
+                    enable_web_search=False,
                     enable_targeted_crawl=not args.skip_refresh_news,
                     top_k=args.tool_agent_top_k,
                     max_iterations=args.tool_agent_iterations,
+                    max_web_pages=args.tool_agent_max_pages,
                     skill_root=args.runtime_skill_root,
                     state_path=args.agent_state_dir / f"{out_dir.name}.json",
                     performance_path=args.tool_performance_path,
@@ -551,11 +561,43 @@ def _build_evidence_context(
                 f"injected_docs={len(extra_documents)}",
                 flush=True,
             )
-            print(f"LangGraph Tool Agent JSON: {tool_path}", flush=True)
+            print(f"Public collection JSON: {tool_path}", flush=True)
             print(f"Research Task Tree JSON: {task_tree_path}", flush=True)
         except Exception as exc:  # noqa: BLE001
             tool_warning = f"LangGraph tool research failed before research build: {type(exc).__name__}: {exc}"
             print(tool_warning, flush=True)
+
+    if not args.skip_tool_agent and not args.skip_refresh_news:
+        try:
+            collection = collect_bounded_query_evidence(
+                settings=load_settings(),
+                media_crawler_root=media_data_root,
+                queries=query_expansion.collection_queries,
+                evidence_memory_path=args.research_evidence_memory_path,
+                top_k_per_query=args.tool_agent_top_k,
+                progress_callback=lambda event: _emit_run_event(
+                    out_dir,
+                    str(event.get("type") or "stage"),
+                    str(event.get("title") or "public information collection"),
+                    str(event.get("message") or ""),
+                    {key: value for key, value in event.items() if key not in {"type", "title", "message"}},
+                ),
+            )
+            tool_result = collection.to_dict()
+            extra_documents = collection.documents
+            tool_warning = "; ".join(collection.warnings)
+            tool_path = out_dir / "tool_research_agent.json"
+            tool_path.write_text(json.dumps(tool_result, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(
+                f"Bounded query collection: queries={len(collection.queries)}, "
+                f"searches={collection.searches_used}, evidence={len(collection.documents)}",
+                flush=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            tool_warning = f"Bounded public-information collection failed: {type(exc).__name__}: {exc}"
+            print(tool_warning, flush=True)
+    elif args.skip_refresh_news:
+        tool_warning = "On-demand public-information collection is disabled for this run."
 
     evidence_store = {
         "schema_version": "evidence_store.v1",
@@ -574,7 +616,9 @@ def _build_evidence_context(
             "extra_document_ids": [doc.id for doc in extra_documents],
         },
         "policy": {
-            "tool_agent_runs_before_research_build": True,
+            "bounded_query_collection_runs_before_research_build": True,
+            "collection_query_count": 4,
+            "collection_search_limit": 10,
             "report_quality_agent_default_web_search": False,
             "single_source_for_llm_and_quality": True,
         },
@@ -708,18 +752,61 @@ def _apply_report_quality_agent(
 
 
 def _strip_excluded_report_sections(markdown: str) -> str:
-    """Remove excluded sections and internal missing-data placeholders from public reports."""
+    """Remove excluded sections and normalize public-report section numbering."""
     kept: list[str] = []
     skipping = False
     for line in (markdown or "").splitlines():
-        if re.match(r"^##\s*(?:7[.、]\s*)?估值分析\s*$", line.strip()):
+        normalized = line.strip()
+        if re.match(r"^##\s*(?:\d+[.、]\s*)?(?:估值分析|盈利预测)\s*$", normalized):
             skipping = True
             continue
         if skipping and re.match(r"^##\s+", line):
             skipping = False
         if not skipping:
             kept.append(line)
-    return _remove_missing_data_content("\n".join(kept))
+    cleaned = _flatten_public_report_subheadings("\n".join(kept))
+    cleaned = _remove_missing_data_content(cleaned)
+    return _normalize_company_report_section_numbers(cleaned)
+
+
+def _flatten_public_report_subheadings(markdown: str) -> str:
+    """Use compact bold labels instead of level-three headings in final reports."""
+    output: list[str] = []
+    for line in (markdown or "").splitlines():
+        match = re.match(r"^###\s+(.+?)\s*$", line)
+        if match:
+            output.append(f"**{match.group(1).strip()}**")
+            continue
+        output.append(line)
+    return "\n".join(output)
+
+
+def _normalize_company_report_section_numbers(markdown: str) -> str:
+    """Keep the public company-report template contiguous after excluded sections."""
+    section_numbers = {
+        "核心结论": 1,
+        "公司概况与商业模式": 2,
+        "近期事件与市场表现": 3,
+        "财务深度分析": 4,
+        "行业与产业链分析": 5,
+        "竞争格局": 6,
+        "预期差与催化剂": 7,
+        "风险与证伪条件": 8,
+        "跟踪指标仪表盘": 9,
+        "跟踪指标": 9,
+        "附录": 10,
+    }
+    output: list[str] = []
+    for line in (markdown or "").splitlines():
+        match = re.match(r"^(##)\s*(?:\d+[.、]\s*)?(.+?)\s*$", line)
+        if match:
+            title = match.group(2).strip()
+            number = section_numbers.get(title)
+            if number is not None:
+                output.append(f"## {number}. {title}")
+                continue
+        output.append(line)
+    return "\n".join(output).strip() + "\n"
 
 
 def _remove_missing_data_content(markdown: str) -> str:
@@ -889,6 +976,7 @@ def _write_llm_outputs(
         with llm_stream_events(_llm_stream_event_writer(out_dir, phase="professional_report")):
             chunked_result = generate_chunked_professional_topic_report(professional_payload)
         professional_markdown = _prepend_lead_markdown(lead_markdown, chunked_result["markdown"])
+        _emit_run_event(out_dir, "stage", "报告质量检查", "正在检查事实证据、章节结构和公开展示内容")
         llm_professional_markdown = _apply_report_quality_agent(
             args,
             out_dir,

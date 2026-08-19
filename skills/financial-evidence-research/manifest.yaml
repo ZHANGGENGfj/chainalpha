@@ -12,28 +12,6 @@ sources:
     description: Run a targeted query through the configured finance-news MediaCrawler sources.
     media_crawler_platform: finance_news
     local_platforms: [finance_news]
-  - name: disclosure_web
-    tool: web_search
-    description: Public company-disclosure and financial-news pages for filings and material events.
-    source_type: company_disclosure
-    search_url_templates:
-      - "https://so.eastmoney.com/news/s?keyword={query}"
-      - "https://www.cs.com.cn/searchlist.html?keyword={query}"
-      - "https://www.cnstock.com/searchResult?word={query}"
-    allowed_domains: [eastmoney.com, so.eastmoney.com, cs.com.cn, cnstock.com]
-    max_linked_pages_per_query: 3
-    timeout_seconds: 15
-  - name: finance_media_web
-    tool: web_search
-    description: Public financial media pages for financial commentary, market data and recent catalysts.
-    source_type: mainstream_media
-    search_url_templates:
-      - "https://search.10jqka.com.cn/search?w={query}&tid=info"
-      - "https://www.nbd.com.cn/search/article_search/?utf8=%E2%9C%93&q={query}"
-      - "http://search.zqrb.cn/search.php?src=all&q={query}&f=_all&s=newsdate_DESC"
-    allowed_domains: [10jqka.com.cn, nbd.com.cn, zqrb.cn]
-    max_linked_pages_per_query: 2
-    timeout_seconds: 15
 capabilities:
   - name: recent_events
     description: Recent news, orders, products and technology progress.
@@ -42,16 +20,16 @@ capabilities:
     evidence_hints: [最新, 订单, 产品进展, 技术进展, 事件]
     evidence_groups: [[最新, 订单, 产品进展, 技术进展, 事件]]
     query_templates: ["{target} {ticker} 最新新闻 订单 产品 技术进展"]
-    tools: [local_search, targeted_news_crawl, web_search]
-    source_profiles: [local_financial_archive, finance_news_crawl, finance_media_web]
+    tools: [local_search, targeted_news_crawl]
+    source_profiles: [local_financial_archive, finance_news_crawl]
   - name: announcements
     description: Company announcements, periodic reports and material-event evidence.
     required: true
     evidence_hints: [公告, 年报, 季报, 交易所, cninfo, 定期报告]
     evidence_groups: [[公告, 年报, 季报, 交易所, cninfo, 定期报告]]
     query_templates: ["{target} {ticker} 最新公告 年报 季报 重大事项"]
-    tools: [local_search, web_search]
-    source_profiles: [local_financial_archive, disclosure_web]
+    tools: [local_search, targeted_news_crawl]
+    source_profiles: [local_financial_archive, finance_news_crawl]
   - name: financial_core
     description: Revenue, profit, gross margin and other core financial facts.
     required: true
@@ -60,28 +38,28 @@ capabilities:
     query_templates:
       - "{target} {ticker} 最新财报 营业收入 归母净利润 扣非净利润 毛利率"
       - "{target} {ticker} 财务分析 收入 利润 毛利率"
-    tools: [local_search, web_search]
-    source_profiles: [local_financial_archive, disclosure_web, finance_media_web]
+    tools: [local_search, targeted_news_crawl]
+    source_profiles: [local_financial_archive, finance_news_crawl]
   - name: working_capital
     description: Cash flow, inventory, receivables, capex and research spending evidence.
     required: true
     evidence_hints: [经营现金流, 现金流, 存货, 应收账款, 在建工程]
     evidence_groups: [[经营现金流, 现金流], [存货], [应收账款]]
     query_templates: ["{target} {ticker} 经营现金流 存货 应收账款 在建工程 研发费用"]
-    tools: [local_search, web_search]
-    source_profiles: [local_financial_archive, disclosure_web, finance_media_web]
+    tools: [local_search, targeted_news_crawl]
+    source_profiles: [local_financial_archive, finance_news_crawl]
   - name: business_structure
     description: Business mix, customers, suppliers and geographic revenue evidence.
     required: true
     evidence_hints: [主营业务, 分产品, 客户, 供应商, 地区收入]
     evidence_groups: [[主营业务, 分产品], [客户, 供应商]]
     query_templates: ["{target} {ticker} 主营业务 分产品收入 分地区收入 前五大客户 供应商"]
-    tools: [local_search, web_search]
-    source_profiles: [local_financial_archive, disclosure_web, finance_media_web]
+    tools: [local_search, targeted_news_crawl]
+    source_profiles: [local_financial_archive, finance_news_crawl]
   - name: market_data
     description: Point-in-time market price, valuation and capital-flow evidence.
     required: false
     evidence_hints: [股价, 市值, 市盈率, pe, pb, 资金流向, 两融]
     query_templates: ["{target} {ticker} 最新股价 市值 PE PB 资金流向 两融"]
-    tools: [web_search, local_search]
-    source_profiles: [finance_media_web, local_financial_archive]
+    tools: [local_search, targeted_news_crawl]
+    source_profiles: [local_financial_archive, finance_news_crawl]

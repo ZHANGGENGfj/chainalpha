@@ -1,4 +1,4 @@
-import { createRun, createSession, deleteSession, fetchReport, fetchRuns, fetchSessions, parseMarkdownSections, saveSession } from "./api.js";
+import { cancelRun, createRun, createSession, deleteSession, fetchReport, fetchRuns, fetchSessions, parseMarkdownSections, saveSession } from "./api.js";
 
 let runs = [];
 // Conversations are owned by the signed-in account and must never fall back
@@ -26,6 +26,8 @@ const state = {
 };
 
 let forceScrollBottom = false;
+const activeRunStreams = new Map();
+const liveDraftScrollState = new Map();
 
 function activeConversation() {
   return conversations.find((item) => item.id === state.activeConversationId) || null;
@@ -166,46 +168,174 @@ function renderThinking(message) {
         <strong>正在研究这个问题</strong>
       </div>
       <p>${escapeHtml(message.stage || "任务已提交，正在准备数据。")}</p>
+      ${message.runId ? `<button type="button" class="end-run-button" data-end-run="${escapeAttr(message.id || "")}">结束对话</button>` : ""}
       ${renderTimeline(message)}
+      ${renderPostCollectionProgress(message.timeline || [])}
+      ${renderLiveDraft(message.liveOutput || "")}
     </div>
   `;
 }
 
 function renderTimeline(message) {
   const pages = collectVisitedPages(message.timeline || []);
-  const expanded = Boolean(message.showTimeline);
+  const progress = crawlerProgress(message.timeline || [], pages.length);
+  // Collection details are internal implementation data. The chat shows only
+  // the current research stage, not crawler names, source hosts, or URLs.
+  const expanded = false;
   return `
     <div class="live-timeline">
       <div class="live-timeline-head">
         <div>
-          <strong>正在检索公开网页</strong>
-          <span>${pages.length ? `已获取 ${pages.length} 个相关页面` : "正在等待检索结果"}</span>
+          <strong>${escapeHtml(progress.title)}</strong>
+          <span>${escapeHtml(progress.detail)}</span>
         </div>
-        <button class="timeline-toggle" data-toggle-timeline="${escapeAttr(message.id || "")}">
+        <button class="timeline-toggle" style="display:none" data-toggle-timeline="${escapeAttr(message.id || "")}">
           ${expanded ? "收起网页" : "查看网页"}
         </button>
       </div>
       ${expanded ? `
         <div class="live-timeline-detail">
-          <div class="live-timeline-subtitle">仅展示已抓取的公开页面；搜索入口页不作为报告证据。</div>
+          <div class="live-timeline-subtitle">仅展示 MediaCrawler 已抓取的相关页面；搜索入口页不作为报告证据。</div>
           ${pages.length ? `
             <div class="event-docs visited-pages">
               ${pages.map((page) => `
                 <div class="event-doc">
-                  <span>${escapeHtml(page.source || page.host || "公开网页")}</span>
+                  <span>${escapeHtml(page.source || page.host || "财经资讯")}</span>
                   <a href="${escapeAttr(page.url)}" target="_blank" rel="noreferrer">${escapeHtml(page.title || page.url)}</a>
                 </div>
               `).join("")}
             </div>
-          ` : `<div class="thinking-compact"><span class="pulse-dot"></span><span>尚未获得可用网页结果。</span></div>`}
+          ` : `<div class="thinking-compact"><span class="pulse-dot"></span><span>${escapeHtml(progress.emptyDetail)}</span></div>`}
         </div>
       ` : `
         <div class="thinking-compact">
           <span class="pulse-dot"></span>
-          <span>正在检索并核验公开资料。</span>
-          ${pages.length ? `<span class="compact-sites">${pages.slice(0, 3).map((page) => escapeHtml(page.host || page.source)).join(" / ")}</span>` : ""}
+          <span>${escapeHtml(progress.compactDetail)}</span>
+          ${""}
         </div>
       `}
+    </div>
+  `;
+}
+
+function crawlerProgress(timeline, pageCount) {
+  const progressEvent = [...timeline].reverse().find((event) =>
+    ["stage", "artifact", "model_stream", "model_stream_warning"].includes(event.type)
+  );
+  const collectionEvent = progressEvent?.type === "stage" && progressEvent.data?.index
+    ? progressEvent
+    : null;
+  if (collectionEvent) {
+    const index = Number(collectionEvent.data?.index || 0);
+    const total = Number(collectionEvent.data?.total || 4);
+    const completed = collectionEvent.data?.status === "completed";
+    const stageLabel = String(collectionEvent.data?.stage_label || "相关公开信息");
+    const stageGoal = String(collectionEvent.data?.stage_goal || "核查相关公开信息");
+    const query = String(collectionEvent.data?.query || "");
+    const progressLabel = `${stageLabel}（${index}/${total}）`;
+    return {
+      title: completed ? `${stageLabel}核查完成` : `正在核查${progressLabel}`,
+      detail: collectionEvent.message || `${stageGoal}${query ? `：${query}` : ""}`,
+      compactDetail: completed ? `${stageLabel}的候选信息已整理。` : `${stageGoal}${query ? `：${query}` : ""}`,
+      emptyDetail: completed ? `正在整理${stageLabel}的候选信息。` : `${stageGoal}。`,
+    };
+  }
+  if (progressEvent) {
+    if (progressEvent.type === "model_stream") {
+      const started = progressEvent.title === "模型开始输出";
+      return {
+        title: started ? "模型开始输出" : "模型输出完成",
+        detail: started ? "正在将已核验信息整理为最终报告" : "正在整理报告结构并进行质量检查",
+        compactDetail: started ? "正在将已核验信息整理为最终报告。" : "正在整理报告结构并进行质量检查。",
+        emptyDetail: "报告草稿将实时显示在下方。",
+      };
+    }
+    const title = String(progressEvent.title || "正在整理研究材料");
+    const detail = String(progressEvent.message || "正在继续处理已获取的信息");
+    return {
+      title,
+      detail,
+      compactDetail: detail,
+      emptyDetail: detail,
+    };
+  }
+  const crawlerEvent = [...timeline].reverse().find((event) =>
+    event.type === "crawler" || event.data?.action === "targeted_news_crawl"
+  );
+  if (crawlerEvent?.type === "crawler" && crawlerEvent.data?.status === "started") {
+    const query = String(crawlerEvent.data?.query || crawlerEvent.message || "").replace(/^正在检索财经资讯：/, "");
+    return {
+      title: "正在通过 MediaCrawler 检索财经资讯",
+      detail: query ? `检索关键词：${query}` : "正在连接已配置财经站点",
+      compactDetail: "正在后台检索财经资讯，浏览器不会显示在桌面。",
+      emptyDetail: "正在抓取，尚未返回结果。",
+    };
+  }
+  if (crawlerEvent?.data?.action === "targeted_news_crawl") {
+    const found = Number(crawlerEvent.data?.documents_found || 0);
+    return {
+      title: "MediaCrawler 检索完成",
+      detail: found ? `已获得 ${found} 条候选资讯，正在继续研究。` : "本轮未获得可用资讯，正在转入下一项证据判断。",
+      compactDetail: found ? `已获得 ${found} 条候选财经资讯。` : "本轮财经资讯未返回可用结果。",
+      emptyDetail: found ? "结果正在整理为可访问网页。" : "本轮未获得可用网页结果。",
+    };
+  }
+  return {
+    title: "正在准备财经资讯检索",
+    detail: pageCount ? `已获取 ${pageCount} 个相关页面` : "等待 Agent 决定下一步证据来源",
+    compactDetail: "正在根据证据缺口安排财经资讯检索。",
+    emptyDetail: "尚未获得可用网页结果。",
+  };
+}
+
+function renderPostCollectionProgress(timeline) {
+  const lastCollectionIndex = timeline.reduce((lastIndex, event, index) => (
+    event.type === "stage" && event.data?.index && event.data?.status === "completed" ? index : lastIndex
+  ), -1);
+  if (lastCollectionIndex < 0) return "";
+  const entries = timeline
+    .slice(lastCollectionIndex + 1)
+    .filter((event) => ["stage", "artifact", "model_stream", "model_stream_warning"].includes(event.type))
+    .filter((event) => event.type !== "model_stream" || event.title !== "模型开始输出")
+    .slice(-8);
+  if (!entries.length) return "";
+  return `
+    <div class="research-progress-log" aria-label="研究处理进度">
+      ${entries.map((event) => `
+        <div class="research-progress-entry">
+          <span>${escapeHtml(progressEntryTitle(event))}</span>
+          <small>${escapeHtml(progressEntryDetail(event))}</small>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function progressEntryTitle(event) {
+  if (event.type === "model_stream") {
+    return event.title === "模型开始输出" ? "模型开始输出" : "模型输出完成";
+  }
+  if (event.type === "model_stream_warning") return "模型输出连接调整";
+  return String(event.title || "研究处理中");
+}
+
+function progressEntryDetail(event) {
+  if (event.type === "model_stream") {
+    return event.title === "模型开始输出"
+      ? "正在将已核验信息整理为最终报告"
+      : "正在整理报告结构并进行质量检查";
+  }
+  if (event.type === "model_stream_warning") return "正在继续生成报告";
+  return String(event.message || "");
+}
+
+function renderLiveDraft(liveOutput) {
+  const text = String(liveOutput || "").trim();
+  if (!text) return "";
+  return `
+    <div class="live-report-draft" aria-live="polite">
+      <span>报告草稿正在生成</span>
+      <pre>${escapeHtml(text)}</pre>
     </div>
   `;
 }
@@ -410,6 +540,9 @@ function bindEvents() {
   document.querySelector("#new-chat").addEventListener("click", () => {
     startNewConversation();
   });
+  document.querySelectorAll("[data-end-run]").forEach((button) => {
+    button.addEventListener("click", () => endRunningConversation(button.dataset.endRun));
+  });
   document.querySelector("#research-collapse")?.addEventListener("click", () => {
     state.sidebarCollapsed = !state.sidebarCollapsed;
     localStorage.setItem("chainalpha-research-sidebar-collapsed", state.sidebarCollapsed ? "1" : "0");
@@ -547,6 +680,26 @@ async function createResearchRun() {
   }
 }
 
+async function endRunningConversation(messageId) {
+  const message = findMessage(messageId);
+  if (!message || message.status !== "running" || !message.runId) return;
+  if (!window.confirm("结束本次研究？未完成的报告将不会继续生成。")) return;
+
+  try {
+    await cancelRun(message.runId);
+    message.status = "cancelled";
+    message.statusText = "已结束";
+    message.stage = "研究已由用户结束";
+    message.sections = [{title: "研究已结束", body: ["本次研究已由用户主动结束。"]}];
+    activeRunStreams.get(message.runId)?.();
+    saveConversations();
+    forceScrollBottom = true;
+    render();
+  } catch (error) {
+    window.alert(`结束研究失败：${error.message || "请稍后重试"}`);
+  }
+}
+
 function streamRunUntilDone(runId, messageId) {
   return new Promise((resolve) => {
     if (typeof EventSource === "undefined") {
@@ -561,6 +714,13 @@ function streamRunUntilDone(runId, messageId) {
     let settled = false;
     let opened = false;
     const source = new EventSource(`${apiBase()}/api/runs/${encodeURIComponent(runId)}/stream`);
+    activeRunStreams.set(runId, () => {
+      if (settled) return;
+      settled = true;
+      source.close();
+      activeRunStreams.delete(runId);
+      resolve();
+    });
 
     source.onopen = () => {
       opened = true;
@@ -585,6 +745,7 @@ function streamRunUntilDone(runId, messageId) {
       if (runInfo.status === "completed") {
         settled = true;
         source.close();
+        activeRunStreams.delete(runId);
         const report = await fetchReport(runId, "markdown");
         current.status = "completed";
         current.statusText = "已完成";
@@ -601,9 +762,23 @@ function streamRunUntilDone(runId, messageId) {
       if (runInfo.status === "failed") {
         settled = true;
         source.close();
+        activeRunStreams.delete(runId);
         current.status = "failed";
         current.statusText = "失败";
         current.sections = [{title: "任务失败", body: [runInfo.log_tail || "请查看 run.log。"]}];
+        saveConversations();
+        updateAssistantMessage(current);
+        resolve();
+        return;
+      }
+
+      if (runInfo.status === "cancelled") {
+        settled = true;
+        source.close();
+        activeRunStreams.delete(runId);
+        current.status = "cancelled";
+        current.statusText = "已结束";
+        current.sections = [{title: "研究已结束", body: ["本次研究已由用户主动结束。"]}];
         saveConversations();
         updateAssistantMessage(current);
         resolve();
@@ -619,10 +794,12 @@ function streamRunUntilDone(runId, messageId) {
       source.close();
       if (settled) return;
       if (!opened) {
+        activeRunStreams.delete(runId);
         pollRunUntilDone(runId, messageId).then(resolve);
         return;
       }
       settled = true;
+      activeRunStreams.delete(runId);
       pollRunUntilDone(runId, messageId).then(resolve);
     };
   });
@@ -633,6 +810,7 @@ async function pollRunUntilDone(runId, messageId) {
     await sleep(2000);
     const message = findMessage(messageId);
     if (!message) return;
+    if (message.status === "cancelled") return;
     try {
       const runInfo = await fetchRunInfo(runId);
       message.runId = runId;
@@ -666,6 +844,15 @@ async function pollRunUntilDone(runId, messageId) {
         return;
       }
 
+      if (runInfo.status === "cancelled") {
+        message.status = "cancelled";
+        message.statusText = "已结束";
+        message.sections = [{title: "研究已结束", body: ["本次研究已由用户主动结束。"]}];
+        saveConversations();
+        updateAssistantMessage(message);
+        return;
+      }
+
       updateAssistantMessage(message, {follow: false});
     } catch (error) {
       message.stage = "等待后端响应";
@@ -684,6 +871,13 @@ function updateAssistantMessage(message, {follow = false} = {}) {
   const scroller = document.querySelector(".chat-scroll");
   const previousTop = scroller?.scrollTop || 0;
   const wasNearBottom = isNearBottom(scroller);
+  const previousDraft = element.querySelector(".live-report-draft pre");
+  if (previousDraft) {
+    liveDraftScrollState.set(message.id, {
+      top: previousDraft.scrollTop,
+      wasNearBottom: previousDraft.scrollHeight - previousDraft.scrollTop - previousDraft.clientHeight < 20,
+    });
+  }
   element.outerHTML = renderMessage(message);
   const nextElement = messageElement(message.id);
   nextElement?.querySelectorAll("[data-artifact]").forEach(bindArtifactButton);
@@ -697,7 +891,17 @@ function updateAssistantMessage(message, {follow = false} = {}) {
     } else {
       current.scrollTop = Math.min(previousTop, current.scrollHeight);
     }
+    restoreLiveDraftScroll(message.id);
   });
+}
+
+function restoreLiveDraftScroll(messageId) {
+  const saved = liveDraftScrollState.get(messageId);
+  const draft = messageElement(messageId)?.querySelector(".live-report-draft pre");
+  if (!draft || !saved) return;
+  draft.scrollTop = saved.wasNearBottom
+    ? draft.scrollHeight
+    : Math.min(saved.top, draft.scrollHeight);
 }
 
 function messageElement(messageId) {
